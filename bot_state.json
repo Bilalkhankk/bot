@@ -1,0 +1,1 @@
+{"active_trades": {"DOGEUSDT": {"side": "short", "entry": 0.17289, "sl": 0.1736866393856164, "tp": 0.1699710488116717, "time": "2025-04-24T11:18:45.684661+00:00", "size": 40.215921343050496, "market_condition": "BEARISH", "taken_1.0x_atr": true, "taken_1.5x_atr": true, "taken_2.5x_atr": false}}, "market_condition": "NEUTRAL", "consecutive_losses": 0}
