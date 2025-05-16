@@ -80,3 +80,6 @@ trading_bot/
 ├── utils/
 │   └── helpers.py
 └── README.md
+
+vpn user name = Bilalkhankk951
+Bil@lkhankk951
