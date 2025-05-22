@@ -8,6 +8,9 @@ from config import settings
 from datetime import datetime, timezone
 import requests
 
+# Global dict to track active trades
+active_trades = {}  # Format: {symbol: SMCSignal}
+
 def send_telegram_message(message):
     url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
@@ -22,30 +25,58 @@ def send_telegram_message(message):
         print(f"Error sending Telegram message: {e}")
         return None
 
-def generate_signal_message(symbol, signal, df, price):
-    atr = df["atr"].iloc[-1]
+def generate_signal_message(signal, df):
+    """Generate entry signal message"""
     rsi = df["rsi"].iloc[-1]
     volume = df["volume"].iloc[-1]
+    rr_ratio = round(abs(signal.tp_price - signal.entry_price) / abs(signal.entry_price - signal.sl_price), 2)
 
-    sl_pct = 1.0
-    tp_pct = 2.0 if signal.market_condition == "NEUTRAL" else 3.0
-
-    sl_price = price - (sl_pct * atr) if signal.signal_type == "BUY" else price + (sl_pct * atr)
-    tp_price = price + (tp_pct * atr) if signal.signal_type == "BUY" else price - (tp_pct * atr)
-
-    message = (
-        f"🚨 *{symbol} {signal.signal_type} Signal* 🚨\n"
-        f"📊 *Price*: {price:.4f}\n"
-        f"⏰ *Timeframe*: {settings.TIMEFRAME}\n"
-        f"📈 *RSI*: {rsi:.2f}\n"
-        f"📉 *ATR*: {atr:.4f}\n"
-        f"💹 *Volume*: {volume:.2f}\n\n"
-        f"🔴 *Suggested SL*: {sl_price:.4f} ({sl_pct}ATR)\n"
-        f"🟢 *Suggested TP*: {tp_price:.4f} ({tp_pct}ATR)\n\n"
-        f"⚡ *Market Condition*: {signal.market_condition}\n"
-        f"📅 *Signal Time*: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC"
+    return (
+        f"🚨 *{signal.symbol} {signal.signal_type} Signal* 🚨\n"
+        f"📊 Entry: {signal.entry_price:.4f}\n"
+        f"🔴 SL: {signal.sl_price:.4f}\n"
+        f"🟢 TP: {signal.tp_price:.4f}\n"
+        f"📉 ATR: {signal.atr:.4f}\n"
+        f"📈 RSI: {rsi:.2f}\n"
+        f"💹 Volume: {volume:.2f}\n\n"
+        f"⚡ Market: {signal.market_condition}\n"
+        f"📊 Risk-Reward: 1:{rr_ratio}"
     )
-    return message
+
+def check_trade_exits():
+    """Check if any active trades hit TP/SL"""
+    for symbol, trade in list(active_trades.items()):
+        try:
+            ticker = exchange.fetch_ticker(symbol)
+            current_price = ticker['last']
+            
+            # Check exit conditions
+            if trade.signal_type == "BUY":
+                hit_sl = current_price <= trade.sl_price
+                hit_tp = current_price >= trade.tp_price
+            else:  # SELL
+                hit_sl = current_price >= trade.sl_price
+                hit_tp = current_price <= trade.tp_price
+
+            if hit_sl or hit_tp:
+                pl_pct = ((current_price - trade.entry_price) / trade.entry_price * 100) * (-1 if trade.signal_type == "SELL" else 1)
+                
+                # Send closure alert
+                send_telegram_message(
+                    f"🔴 *TRADE CLOSED* 🔴\n"
+                    f"Pair: {symbol}\n"
+                    f"Direction: {trade.signal_type}\n"
+                    f"Entry: {trade.entry_price:.4f}\n"
+                    f"Exit: {current_price:.4f}\n"
+                    f"Reason: {'SL Hit' if hit_sl else 'TP Hit'}\n"
+                    f"P/L: {pl_pct:.2f}%"
+                )
+                
+                # Remove from active trades
+                active_trades.pop(symbol)
+
+        except Exception as e:
+            print(f"Error checking {symbol}: {str(e)[:100]}")
 
 def run_signal_bot():
     print("\n=== BINANCE FUTURES SIGNAL BOT ===")
@@ -53,8 +84,8 @@ def run_signal_bot():
 
     while True:
         try:
+            # Check for new signals
             market_condition = check_market_condition()
-
             for symbol in settings.PAIRS:
                 df = fetch_ohlcv(symbol, settings.TIMEFRAME)
                 if df is None:
@@ -63,25 +94,20 @@ def run_signal_bot():
                 df = calculate_indicators(df)
                 signal = get_signal(df, symbol, market_condition)
 
-                if signal:
-                    ticker = exchange.fetch_ticker(symbol)
-                    if ticker is None:
-                        continue
+                if signal and symbol not in active_trades:
+                    active_trades[symbol] = signal
+                    send_telegram_message(generate_signal_message(signal, df))
+                    print(f"New trade: {symbol} {signal.signal_type}")
 
-                    price = ticker["last"]
-                    message = generate_signal_message(symbol, signal, df, price)
-                    send_telegram_message(message)
-                    print(f"\nSignal generated for {symbol} at {price:.4f}")
-                    print(message)
-
-            print("\nScanning for signals... Next check in 60 seconds")
+            # Check exits every minute
+            check_trade_exits()
             time.sleep(60)
 
         except KeyboardInterrupt:
-            print("\nSignal bot stopped by user")
+            print("\nBot stopped by user")
             break
         except Exception as e:
-            print(f"\nSignal bot error: {str(e)[:100]}")
+            print(f"\nError: {str(e)[:200]}")
             time.sleep(30)
 
 if __name__ == "__main__":

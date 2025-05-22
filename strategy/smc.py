@@ -26,6 +26,13 @@ SMC_PARAMS = {
     
     # Position sizing
     'atr_risk_multiplier': 0.5,  # Risk 0.5% of capital per trade
+    # Enhanced SL/TP Parameters
+    'sl_multiplier_trend': 0.8,      # Tighter SL in trends
+    'tp_multiplier_trend': 2.5,      # Wider TP in trends
+    'sl_multiplier_range': 1.0,      # Wider SL in ranges
+    'tp_multiplier_range': 2.0,      # Moderate TP in ranges
+    'trailing_activation': 1.5,      # Activate after 1.5x ATR profit
+    'trailing_distance': 0.8         # Maintain 0.8x ATR from peak
 }
 
 # ========== LOGGING SETUP ==========
@@ -38,14 +45,56 @@ logger = logging.getLogger(__name__)
 
 class SMCSignal:
     def __init__(self, signal_type: str, symbol: str, score: float, 
-                 threshold: float, conditions: Dict, atr: float = None):
+                 threshold: float, conditions: Dict, atr: float,
+                 entry_price: float, market_condition: str):
         self.signal_type = signal_type
         self.symbol = symbol
         self.score = score
         self.threshold = threshold
         self.conditions = conditions
         self.atr = atr
+        self.entry_price = entry_price
+        self.market_condition = market_condition
         self.timestamp = datetime.utcnow()
+        self.trailing_active = False
+        self.trailing_stop = None
+
+    def _calculate_sl_tp(self) -> Tuple[float, float]:
+        """Calculate dynamic SL/TP based on market condition"""
+        if self.market_condition in ["BULLISH", "BEARISH"]:
+            sl_mult = SMC_PARAMS['sl_multiplier_trend']
+            tp_mult = SMC_PARAMS['tp_multiplier_trend']
+        else:  # NEUTRAL
+            sl_mult = SMC_PARAMS['sl_multiplier_range']
+            tp_mult = SMC_PARAMS['tp_multiplier_range']
+
+        if self.signal_type == "BUY":
+            return (
+                self.entry_price - (sl_mult * self.atr),
+                self.entry_price + (tp_mult * self.atr)
+            )
+        else:  # SELL
+            return (
+                self.entry_price + (sl_mult * self.atr),
+                self.entry_price - (tp_mult * self.atr)
+            )
+
+    def update_trailing_stop(self, current_price: float) -> Optional[float]:
+        """Update trailing stop based on price movement"""
+        if not self.trailing_active:
+            profit = abs(current_price - self.entry_price)
+            if profit >= (SMC_PARAMS['trailing_activation'] * self.atr):
+                self.trailing_active = True
+        
+        if self.trailing_active:
+            if self.signal_type == "BUY":
+                new_stop = current_price - (SMC_PARAMS['trailing_distance'] * self.atr)
+                self.trailing_stop = max(new_stop, self.trailing_stop) if self.trailing_stop else new_stop
+            else:  # SELL
+                new_stop = current_price + (SMC_PARAMS['trailing_distance'] * self.atr)
+                self.trailing_stop = min(new_stop, self.trailing_stop) if self.trailing_stop else new_stop
+            return self.trailing_stop
+        return None
         
     def to_dict(self):
         return {
@@ -55,7 +104,11 @@ class SMCSignal:
             'score': self.score,
             'threshold': self.threshold,
             'conditions': self.conditions,
-            'atr': self.atr
+            'atr': self.atr,
+            'entry_price': self.entry_price,
+            'sl_price': self.sl_price,
+            'tp_price': self.tp_price,
+            'trailing_stop': self.trailing_stop
         }
 
 def is_optimal_trading_time() -> bool:
@@ -286,19 +339,21 @@ def get_signal(df: pd.DataFrame, symbol: str, market_condition: str,
         
         # Generate signal with all conditions validated
         atr = df["atr"].iloc[-1] if "atr" in df.columns else None
-        
+        entry_price = df["close"].iloc[-1]
         if (buy_score >= adaptive_threshold and conditions.get('rsi_ok', False) and 
             (buy_score >= SMC_PARAMS['min_score_non_trend'] or market_condition != "BEARISH")):
             return SMCSignal(
                 "BUY", symbol, buy_score, adaptive_threshold,
-                {k: v for k, v in conditions.items() if v}, atr
+                {k: v for k, v in conditions.items() if v},
+                atr, entry_price, market_condition
             )
             
         elif (sell_score >= adaptive_threshold and conditions.get('rsi_ok', False) and 
               (sell_score >= SMC_PARAMS['min_score_non_trend'] or market_condition != "BULLISH")):
             return SMCSignal(
                 "SELL", symbol, sell_score, adaptive_threshold,
-                {k: v for k, v in conditions.items() if v}, atr
+                {k: v for k, v in conditions.items() if v},
+                atr, entry_price, market_condition
             )
             
         return None

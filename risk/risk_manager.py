@@ -56,45 +56,9 @@ class RiskManager:
 
     def calculate_stop_loss(self, df, entry_price, side):
         """
-        Calculate stop loss price based on market structure and volatility
-        Args:
-            df: DataFrame containing price data and indicators
-            entry_price: Entry price for the position
-            side: 'long' or 'short'
-        Returns:
-            float: Calculated stop loss price
-        """
-        try:
-            atr = df["atr"].iloc[-1]
-            recent_pivot = (df["low"].rolling(3).min().iloc[-1] if side == "long" 
-                          else df["high"].rolling(3).max().iloc[-1])
-            
-            atr_pct = (atr / entry_price) * 100
-            
-            if self.market_condition == "NEUTRAL":
-                buffer_pct = 1.5  # Wider buffer in neutral markets
-                atr_multiplier = 1.2 + (atr_pct / 25)
-            else:  # Trending market (BULLISH/BEARISH)
-                buffer_pct = 0.8   # Tighter buffer in trends
-                atr_multiplier = 0.8 + (atr_pct / 30)
-            
-            # Calculate structural SL (price-based)
-            structural_sl = (recent_pivot * (1 - buffer_pct/100) if side == "long" 
-                           else recent_pivot * (1 + buffer_pct/100))
-            
-            # Calculate ATR-based SL
-            atr_sl = (entry_price - (atr_multiplier * atr) if side == "long"
-                     else entry_price + (atr_multiplier * atr))
-            
-            # Use the more conservative (wider) SL
-            return (max(atr_sl, structural_sl) if side == "long" 
-                   else min(atr_sl, structural_sl))
-                   
-        except Exception as e:
-            print(f"SL calculation error: {str(e)[:100]}")
-            # Fallback to 1.5x ATR if calculation fails
-            return (entry_price - 1.5 * atr if side == "long" 
-                    else entry_price + 1.5 * atr)
+         Calculate stop loss price (always set to entry price)
+            """
+        return entry_price
 
     def get_position_size(self, symbol, atr, entry_price, account_balance=None):
         """
