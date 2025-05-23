@@ -109,7 +109,48 @@ def run_signal_bot():
         except Exception as e:
             print(f"\nError: {str(e)[:200]}")
             time.sleep(30)
+def monitor_trades(active_signals: dict):
+    """Enhanced exit monitoring with pair-specific logic"""
+    for symbol, signal in list(active_signals.items()):
+        try:
+            ticker = exchange.fetch_ticker(symbol)
+            current_price = ticker['last']
+            
+            # Update trailing stop
+            trailing_stop = signal.update_trailing_stop(current_price)
+            
+            # Check exit conditions
+            if signal.signal_type == "BUY":
+                hit_sl = current_price <= (trailing_stop or signal.sl_price)
+                hit_tp = current_price >= signal.tp_price
+            else:  # SELL
+                hit_sl = current_price >= (trailing_stop or signal.sl_price)
+                hit_tp = current_price <= signal.tp_price
 
+            if hit_sl or hit_tp:
+                # Calculate P/L
+                pl_pct = ((current_price - signal.entry_price) / signal.entry_price * 100) * (
+                    -1 if signal.signal_type == "SELL" else 1
+                )
+                
+                # Generate exit message
+                message = (
+                    f"⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+                    f"✅ *TRADE CLOSED* {'🔴' if hit_sl else '🟢'}\n"
+                    f"• Pair: {symbol}\n"
+                    f"• Direction: {signal.signal_type}\n"
+                    f"• Entry: {signal.entry_price:.4f}\n"
+                    f"• Exit: {current_price:.4f}\n"
+                    f"• Reason: {'SL Hit' if hit_sl else 'TP Hit'}\n"
+                    f"• P/L: {pl_pct:.2f}%\n"
+                    f"• ATR Used: {signal.atr:.2f}\n"
+                    f"⎯⎯⎯⎯⎯⎯⎯⎯⎯"
+                )
+                send_telegram_message(message)
+                active_signals.pop(symbol)
+                
+        except Exception as e:
+            print(f"Trade monitoring error ({symbol}): {str(e)[:100]}")
 if __name__ == "__main__":
     setup_exchange()
     run_signal_bot()

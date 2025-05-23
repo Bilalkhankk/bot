@@ -1,5 +1,5 @@
 # Trading Parameters
-PAIRS = ["XRPUSDT", "DOGEUSDT", "ADAUSDT", "SUIUSDT", "TRXUSDT", "BLURUSDT"]
+PAIRS = ["XRPUSDT", "DOGEUSDT", "ADAUSDT", "ETHUSDT", "TRXUSDT", "SOLUSDT"]
 TIMEFRAME = "15m"
 
 # Telegram Configuration
@@ -12,14 +12,22 @@ RISK_PERCENT = 1
 
 # Technical Indicator Thresholds
 ADX_THRESHOLDS = {
-    "XRPUSDT": 24,
-    "DOGEUSDT": 22,
-    "ADAUSDT": 22,
-    "SUIUSDT": 23,
-    "TRXUSDT": 21,
-    "BLURUSDT": 20
+    "XRPUSDT": 22,    # Moderate volatility
+    "DOGEUSDT": 20,   # High volatility
+    "ADAUSDT": 24,    # Moderate-high volatility 
+    "ETHUSDT": 25,    # Stable trending
+    "TRXUSDT": 18,    # Extreme volatility
+    "SOLUSDT": 26,    # Strong trends
+    "BTCUSDT": 25     # Market benchmark
 }
-
+MAX_LEVERAGE = {
+    "DOGEUSDT": 15,
+    "TRXUSDT": 10,
+    "XRPUSDT": 20,
+    "ADAUSDT": 20,
+    "ETHUSDT": 50,
+    "SOLUSDT": 50
+}
 # Exchange configuration (read-only access, no account needed)
 EXCHANGE_CONFIG = {
     'enableRateLimit': True,

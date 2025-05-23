@@ -27,10 +27,16 @@ SMC_PARAMS = {
     # Position sizing
     'atr_risk_multiplier': 0.5,  # Risk 0.5% of capital per trade
     # Enhanced SL/TP Parameters
-    'sl_multiplier_trend': 0.8,      # Tighter SL in trends
-    'tp_multiplier_trend': 2.5,      # Wider TP in trends
-    'sl_multiplier_range': 1.0,      # Wider SL in ranges
-    'tp_multiplier_range': 2.0,      # Moderate TP in ranges
+    'sl_multiplier_trend': {
+        "XRPUSDT": 0.7, "DOGEUSDT": 0.6, "ADAUSDT": 0.75,
+        "ETHUSDT": 0.8, "TRXUSDT": 0.5, "SOLUSDT": 0.85
+    },
+    'tp_multiplier_trend': {
+        "XRPUSDT": 2.8, "DOGEUSDT": 3.0, "ADAUSDT": 2.5,
+        "ETHUSDT": 2.3, "TRXUSDT": 3.2, "SOLUSDT": 2.2
+    },
+    'sl_multiplier_range': 1.2,      # Wider SL in ranges
+    'tp_multiplier_range': 2.2,
     'trailing_activation': 1.5,      # Activate after 1.5x ATR profit
     'trailing_distance': 0.8         # Maintain 0.8x ATR from peak
 }
@@ -58,12 +64,12 @@ class SMCSignal:
         self.timestamp = datetime.utcnow()
         self.trailing_active = False
         self.trailing_stop = None
-
+        self.sl_price, self.tp_price = self._calculate_sl_tp()
     def _calculate_sl_tp(self) -> Tuple[float, float]:
         """Calculate dynamic SL/TP based on market condition"""
         if self.market_condition in ["BULLISH", "BEARISH"]:
-            sl_mult = SMC_PARAMS['sl_multiplier_trend']
-            tp_mult = SMC_PARAMS['tp_multiplier_trend']
+            sl_mult = SMC_PARAMS['sl_multiplier_trend'].get(self.symbol, 0.8)
+            tp_mult = SMC_PARAMS['tp_multiplier_trend'].get(self.symbol, 2.5)
         else:  # NEUTRAL
             sl_mult = SMC_PARAMS['sl_multiplier_range']
             tp_mult = SMC_PARAMS['tp_multiplier_range']
