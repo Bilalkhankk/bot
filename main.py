@@ -101,10 +101,11 @@ def run_signal_bot():
 
             # Check exits every minute
             check_trade_exits()
+            print("Waiting for 60 seconds...\n")
             time.sleep(60)
 
         except KeyboardInterrupt:
-            print("\nBot stopped by user")
+            print("\nBot stopped by BK")
             break
         except Exception as e:
             print(f"\nError: {str(e)[:200]}")
