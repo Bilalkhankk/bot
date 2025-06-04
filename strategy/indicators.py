@@ -39,7 +39,10 @@ INDICATOR_PARAMS = {
     
     # Divergence Parameters
     'divergence_lookback': 6,
-    'divergence_volume_multiplier': 1.2
+    'divergence_volume_multiplier': 1.2,
+    
+    # Liquidity Zones
+    'liquidity_lookback': 50
 }
 
 class IndicatorError(Exception):
@@ -55,16 +58,6 @@ def calculate_indicators(df: pd.DataFrame) -> Optional[pd.DataFrame]:
         
     Returns:
         pd.DataFrame: DataFrame with added indicator columns, or None if calculation fails
-        
-    Example:
-        >>> data = yf.download('AAPL', period='6mo')
-        >>> df = calculate_indicators(data)
-        >>> print(df[['close', 'ema20', 'rsi']].tail())
-        
-    Professional Recommendations:
-    1. VWAP added for institutional activity tracking
-    2. Supertrend implemented for trend confirmation
-    3. Volume-weighted indicators included
     """
     # Input validation
     if df is None or len(df) < 50:
@@ -108,7 +101,7 @@ def calculate_indicators(df: pd.DataFrame) -> Optional[pd.DataFrame]:
         df["volume_ma"] = df["volume"].rolling(params['volume_ma_length']).mean()
         df["obv"] = ta.obv(df["close"], df["volume"])
         
-        # VWAP (New)
+        # VWAP
         df["vwap"] = ta.vwap(df["high"], df["low"], df["close"], df["volume"])
         
         # ===== TREND INDICATORS =====
@@ -130,7 +123,7 @@ def calculate_indicators(df: pd.DataFrame) -> Optional[pd.DataFrame]:
         )
         df["adx"] = adx_data[f"ADX_{params['adx_length']}"]
         
-        # Supertrend (New)
+        # Supertrend
         supertrend = ta.supertrend(
             df["high"], df["low"], df["close"],
             length=7,
@@ -168,55 +161,65 @@ def calculate_indicators(df: pd.DataFrame) -> Optional[pd.DataFrame]:
 def check_divergence(df: pd.DataFrame) -> Tuple[bool, bool]:
     """
     Check for regular bullish and bearish divergences.
-    
-    Args:
-        df (pd.DataFrame): DataFrame with indicator values from calculate_indicators()
-        
-    Returns:
-        Tuple[bool, bool]: (bullish_divergence, bearish_divergence)
-        
-    Example:
-        >>> df = calculate_indicators(data)
-        >>> bull_div, bear_div = check_divergence(df)
-        >>> print(f"Bullish: {bull_div}, Bearish: {bear_div}")
-        
-    Professional Recommendations:
-    1. Includes volume confirmation
-    2. Checks multiple indicator types (RSI and MACD)
-    3. Simple implementation that can be extended for hidden divergences
     """
     if len(df) < 20:
         return False, False
     
     params = INDICATOR_PARAMS
     lookback = params['divergence_lookback']
-    last = df.iloc[-lookback:]
     
     try:
         # Price Levels
-        price_lows = last["close"].rolling(2).min()
-        price_highs = last["close"].rolling(2).max()
+        price_lows = df["low"].rolling(5).min().iloc[-lookback:]
+        price_highs = df["high"].rolling(5).max().iloc[-lookback:]
         
-        # Indicator Levels
-        rsi_lows = last["rsi"].rolling(2).min()
-        rsi_highs = last["rsi"].rolling(2).max()
-        macd_lows = last["macd_hist"].rolling(2).min()
-        macd_highs = last["macd_hist"].rolling(2).max()
+        # Indicator Levels (smoothed)
+        rsi_lows = df["rsi"].rolling(3).mean().iloc[-lookback:]
+        rsi_highs = df["rsi"].rolling(3).mean().iloc[-lookback:]
+        macd_lows = df["macd_hist"].rolling(3).mean().iloc[-lookback:]
+        macd_highs = df["macd_hist"].rolling(3).mean().iloc[-lookback:]
         
-        # Classic Divergence
-        bull_div = (price_lows.iloc[-1] < price_lows.iloc[-2]) and (
-            (rsi_lows.iloc[-1] > rsi_lows.iloc[-2]) or 
-            (macd_lows.iloc[-1] > macd_lows.iloc[-2]))
+        # Bullish divergence: price makes lower low but indicator makes higher low
+        bull_div = (
+            (price_lows.iloc[-1] < price_lows.iloc[-2]) and 
+            (
+                (rsi_lows.iloc[-1] > rsi_lows.iloc[-2] + 3) or 
+                (macd_lows.iloc[-1] > macd_lows.iloc[-2] + 0.001)
+            ) and
+            (df['volume'].iloc[-1] > df['volume_ma'].iloc[-1] * params['divergence_volume_multiplier'])
+        )
         
-        bear_div = (price_highs.iloc[-1] > price_highs.iloc[-2]) and (
-            (rsi_highs.iloc[-1] < rsi_highs.iloc[-2]) or 
-            (macd_highs.iloc[-1] < macd_highs.iloc[-2]))
+        # Bearish divergence: price makes higher high but indicator makes lower high
+        bear_div = (
+            (price_highs.iloc[-1] > price_highs.iloc[-2]) and 
+            (
+                (rsi_highs.iloc[-1] < rsi_highs.iloc[-2] - 3) or 
+                (macd_highs.iloc[-1] < macd_highs.iloc[-2] - 0.001)
+            ) and
+            (df['volume'].iloc[-1] > df['volume_ma'].iloc[-1] * params['divergence_volume_multiplier'])
+        )
         
-        # Volume Confirmation
-        vol_mult = params['divergence_volume_multiplier']
-        volume_confirmation = (df['volume'].iloc[-1] > df['volume_ma'].iloc[-1] * vol_mult)
-        
-        return bull_div and volume_confirmation, bear_div and volume_confirmation
+        return bull_div, bear_div
         
     except Exception as e:
         raise IndicatorError(f"Divergence check failed: {str(e)}") from e
+
+def detect_liquidity_zones(df: pd.DataFrame, lookback: int = None) -> dict:
+    """
+    Identify significant support/resistance levels
+    """
+    params = INDICATOR_PARAMS
+    if lookback is None:
+        lookback = params.get('liquidity_lookback', 50)
+    
+    if len(df) < lookback:
+        return {'key_support': 0, 'key_resistance': 0}
+    
+    try:
+        # Use recent high/low as key levels
+        return {
+            'key_support': df['low'].iloc[-lookback:].min(),
+            'key_resistance': df['high'].iloc[-lookback:].max()
+        }
+    except Exception as e:
+        raise IndicatorError(f"Liquidity zone detection failed: {str(e)}") from e

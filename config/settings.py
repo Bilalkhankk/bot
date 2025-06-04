@@ -10,15 +10,13 @@ TELEGRAM_CHAT_ID = "-1002655134174"  # Replace with your actual chat ID
 LEVERAGE = 5
 RISK_PERCENT = 1
 
-# Technical Indicator Thresholds
+
 ADX_THRESHOLDS = {
-    "XRPUSDT": 22,    # Moderate volatility
-    "DOGEUSDT": 20,   # High volatility
-    "ADAUSDT": 24,    # Moderate-high volatility 
-    "ETHUSDT": 25,    # Stable trending
-    "TRXUSDT": 18,    # Extreme volatility
-    "SOLUSDT": 26,    # Strong trends
-    "BTCUSDT": 25     # Market benchmark
+    "BTCUSDT": 22,
+    "ETHUSDT": 20,
+    "SOLUSDT": 25,
+    "DOGEUSDT": 25,  # Require stronger trend for volatile assets
+    "XRPUSDT": 20
 }
 MAX_LEVERAGE = {
     "DOGEUSDT": 15,
@@ -27,6 +25,15 @@ MAX_LEVERAGE = {
     "ADAUSDT": 20,
     "ETHUSDT": 50,
     "SOLUSDT": 50
+}
+VOLATILITY_RATINGS = {
+    "BTCUSDT": 0.9,
+    "ETHUSDT": 0.85,
+    "SOLUSDT": 0.8,
+    "XRPUSDT": 0.7,
+    "DOGEUSDT": 0.6,  # High volatility
+    "ADAUSDT": 0.75,
+    "TRXUSDT": 0.65
 }
 # Exchange configuration (read-only access, no account needed)
 EXCHANGE_CONFIG = {

@@ -60,7 +60,8 @@ python-dotenv   1.22.0	       API key security
 # BOt_setup
 PKG_Download = pip install -r requirements.txt
 
-
+# Python_Version
+Pythons = Python 3.9.13
 
 
 trading_bot/

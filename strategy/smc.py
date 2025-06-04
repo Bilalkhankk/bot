@@ -1,4 +1,4 @@
-from .indicators import calculate_indicators, check_divergence
+from .indicators import calculate_indicators, check_divergence, detect_liquidity_zones
 from config import settings
 from datetime import datetime
 import logging
@@ -38,16 +38,30 @@ SMC_PARAMS = {
     'sl_multiplier_range': 1.2,      # Wider SL in ranges
     'tp_multiplier_range': 2.2,
     'trailing_activation': 1.5,      # Activate after 1.5x ATR profit
-    'trailing_distance': 0.8         # Maintain 0.8x ATR from peak
+    'trailing_distance': 0.8,        # Maintain 0.8x ATR from peak
+    'min_atr_threshold': 0.005,      # Min ATR % of price (0.5%)
+    'min_sl_buffer': 0.003           # 0.3% minimum stop loss buffer
 }
 
-# ========== LOGGING SETUP ==========
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    filename='smc_strategy.log'
-)
+# ========== ENHANCED LOGGING SETUP ==========
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+# Remove any existing handlers
+if logger.hasHandlers():
+    logger.handlers.clear()
+
+# File handler (writes to smc_strategy.log)
+file_handler = logging.FileHandler('smc_strategy.log')
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+# Stream handler (prints to terminal)
+stream_handler = logging.StreamHandler()
+stream_handler.setFormatter(logging.Formatter('%(message)s'))  # Clean format for terminal
+
+# Add both handlers
+logger.addHandler(file_handler)
+logger.addHandler(stream_handler)
 
 class SMCSignal:
     def __init__(self, signal_type: str, symbol: str, score: float, 
@@ -65,8 +79,9 @@ class SMCSignal:
         self.trailing_active = False
         self.trailing_stop = None
         self.sl_price, self.tp_price = self._calculate_sl_tp()
+        
     def _calculate_sl_tp(self) -> Tuple[float, float]:
-        """Calculate dynamic SL/TP based on market condition"""
+        """Calculate dynamic SL/TP with minimum buffer"""
         if self.market_condition in ["BULLISH", "BEARISH"]:
             sl_mult = SMC_PARAMS['sl_multiplier_trend'].get(self.symbol, 0.8)
             tp_mult = SMC_PARAMS['tp_multiplier_trend'].get(self.symbol, 2.5)
@@ -74,16 +89,22 @@ class SMCSignal:
             sl_mult = SMC_PARAMS['sl_multiplier_range']
             tp_mult = SMC_PARAMS['tp_multiplier_range']
 
+        # Calculate base SL/TP
         if self.signal_type == "BUY":
-            return (
-                self.entry_price - (sl_mult * self.atr),
-                self.entry_price + (tp_mult * self.atr)
-            )
+            sl = self.entry_price - (sl_mult * self.atr)
+            tp = self.entry_price + (tp_mult * self.atr)
         else:  # SELL
-            return (
-                self.entry_price + (sl_mult * self.atr),
-                self.entry_price - (tp_mult * self.atr)
-            )
+            sl = self.entry_price + (sl_mult * self.atr)
+            tp = self.entry_price - (tp_mult * self.atr)
+        
+        # Add minimum buffer to avoid noise
+        min_buffer = SMC_PARAMS['min_sl_buffer'] * self.entry_price
+        if self.signal_type == "BUY":
+            sl = min(sl, self.entry_price - min_buffer)
+        else:
+            sl = max(sl, self.entry_price + min_buffer)
+            
+        return sl, tp
 
     def update_trailing_stop(self, current_price: float) -> Optional[float]:
         """Update trailing stop based on price movement"""
@@ -118,49 +139,82 @@ class SMCSignal:
         }
 
 def is_optimal_trading_time() -> bool:
-    """Avoid low-liquidity periods (00:00-04:00 UTC)"""
+    """Avoid low-liquidity periods (Asian session and weekends)"""
     utc_hour = datetime.utcnow().hour
-    return 4 <= utc_hour < 24
+    weekday = datetime.utcnow().weekday()
+    return (8 <= utc_hour < 22) and (weekday < 5)
 
 def check_market_condition() -> str:
-    """Determine the overall market condition (BULLISH, BEARISH, or NEUTRAL)"""
+    """Determine market condition using multiple assets with majority voting"""
     try:
-        btc_df = fetch_ohlcv("BTCUSDT", settings.TIMEFRAME, 100)
-        btc_df = calculate_indicators(btc_df)
+        symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+        trend_results = {"BULLISH": 0, "BEARISH": 0, "NEUTRAL": 0}
+        btc_data = None
         
-        if btc_df is None or len(btc_df) < 50:
-            return "NEUTRAL"
+        for symbol in symbols:
+            df = fetch_ohlcv(symbol, settings.TIMEFRAME, 100)
+            if df is None or len(df) < 50:
+                continue
+                
+            df = calculate_indicators(df)
+            last = df.iloc[-1]
+            prev = df.iloc[-2]
             
-        last = btc_df.iloc[-1]
-        prev = btc_df.iloc[-2]
+            # Store BTC data for logging
+            if symbol == "BTCUSDT":
+                btc_data = (last, prev)
+            
+            # Determine trend strength
+            adx_threshold = settings.ADX_THRESHOLDS.get(symbol, 20)
+            adx_strong = last["adx"] > adx_threshold + 5
+            adx_weak = last["adx"] < adx_threshold - 5
+            
+            # Define trend conditions
+            uptrend = (
+                last["ema10"] > last["ema20"] > last["ema50"] and
+                adx_strong and
+                last["close"] > last["recent_high"]
+            )
+            
+            downtrend = (
+                last["ema10"] < last["ema20"] < last["ema50"] and
+                adx_strong and
+                last["close"] < last["recent_low"]
+            )
+            
+            neutral = (
+                adx_weak or
+                abs(last["ema10"] - last["ema20"]) / last["close"] < 0.008
+            )
+            
+            # Classify market condition
+            if uptrend:
+                trend_results["BULLISH"] += 1
+            elif downtrend:
+                trend_results["BEARISH"] += 1
+            elif neutral:
+                trend_results["NEUTRAL"] += 1
         
-        adx_threshold = settings.ADX_THRESHOLDS.get("BTCUSDT", 20)
-        adx_weak = last["adx"] < (adx_threshold - 5)
-        narrow_bb = last["bb_width"] < 0.03
-        low_volatility = (btc_df["close"].pct_change().abs().rolling(20).mean().iloc[-1] < 0.002)
-        ema_distance = abs(last["ema10"] - last["ema20"]) / last["close"] < 0.008
-        
-        higher_high = last["close"] > prev["recent_high"]
-        lower_low = last["close"] < prev["recent_low"]
-        volume_ok = last["volume"] > last["volume_ma"] * 1.2
-        
-        trend_up = (last["ema10"] > last["ema20"] > last["ema50"]) and (last["adx"] > adx_threshold + 5)
-        trend_down = (last["ema10"] < last["ema20"] < last["ema50"]) and (last["adx"] > adx_threshold + 5)
-        
-        if adx_weak and (narrow_bb or low_volatility):
-            market_condition = "NEUTRAL"
-        elif trend_up and (higher_high or volume_ok):
+        # Determine market condition by majority vote
+        if trend_results["BULLISH"] >= 2:
             market_condition = "BULLISH"
-        elif trend_down and (lower_low or volume_ok):
+        elif trend_results["BEARISH"] >= 2:
             market_condition = "BEARISH"
         else:
             market_condition = "NEUTRAL"
         
-        print(f"\nMarket: {market_condition} | BTC: {last['close']:.2f}")
-        print(f"EMA10: {last['ema10']:.2f} | EMA20: {last['ema20']:.2f}")
-        print(f"RSI: {last['rsi']:.1f} | ADX: {last['adx']:.1f} (Threshold: {adx_threshold})")
-        print(f"Volume: {'Strong' if volume_ok else 'Weak'}")
-        print(f"BB Width: {last['bb_width']:.4f} | Volatility: {'Low' if low_volatility else 'Normal'}")
+        # Log BTC status to terminal and file
+        if btc_data:
+            last, prev = btc_data
+            logger.info(
+                f"========================================\n"
+                f"MARKET CONDITION: {market_condition}\n"
+                f"BTC Price: ${last['close']:.2f}\n"
+                f"EMAs: 10={last['ema10']:.2f} | 20={last['ema20']:.2f}\n"
+                f"RSI: {last['rsi']:.1f} | ADX: {last['adx']:.1f}\n"
+                f"Volume: {'Strong (UP)' if last['volume'] > last['volume_ma'] * 1.2 else 'Weak (DOWN)'}\n"
+                f"========================================"
+            )
         
         return market_condition
         
@@ -168,8 +222,8 @@ def check_market_condition() -> str:
         logger.error(f"Market check error: {str(e)}", exc_info=True)
         return "NEUTRAL"
 
-def check_higher_timeframe_confirmation(exchange, symbol: str, signal_type: str) -> bool:
-    """Check higher timeframe alignment"""
+def check_higher_timeframe_confirmation(symbol: str, signal_type: str, market_condition: str) -> bool:
+    """Context-aware HTF confirmation"""
     try:
         htf_df = fetch_ohlcv(symbol, SMC_PARAMS['higher_timeframe'], 50)
         if htf_df is None or len(htf_df) < 20:
@@ -178,20 +232,43 @@ def check_higher_timeframe_confirmation(exchange, symbol: str, signal_type: str)
         htf_df = calculate_indicators(htf_df)
         last = htf_df.iloc[-1]
         
+        # Strong confirmation required for counter-trend signals
+        if market_condition == "BEARISH" and signal_type == "BUY":
+            return (
+                last['close'] > last['ema20'] and 
+                last['rsi'] > 55 and
+                last['adx'] > 25
+            )
+        elif market_condition == "BULLISH" and signal_type == "SELL":
+            return (
+                last['close'] < last['ema20'] and 
+                last['rsi'] < 45 and
+                last['adx'] > 25
+            )
+        
+        # Standard trend-following confirmation
         if signal_type == "BUY":
-            return (last['ema5'] > last['ema20'] and 
-                    last['close'] > last['bb_middle'] and
-                    last['rsi'] > 50)
-        return (last['ema5'] < last['ema20'] and 
+            return (
+                last['ema5'] > last['ema20'] and 
+                last['close'] > last['bb_middle'] and
+                last['rsi'] > 50
+            )
+        else:  # SELL
+            return (
+                last['ema5'] < last['ema20'] and 
                 last['close'] < last['bb_middle'] and
-                last['rsi'] < 50)
+                last['rsi'] < 50
+            )
     except Exception as e:
         logger.error(f"HTF confirmation error for {symbol}: {str(e)}")
         return False
 
-def calculate_position_size(atr: float, price: float, account_balance: float) -> float:
-    """Calculate position size based on volatility"""
-    risk_amount = account_balance * (SMC_PARAMS['atr_risk_multiplier'] / 100)
+def calculate_position_size(atr: float, price: float, account_balance: float, symbol: str) -> float:
+    """Position sizing with volatility adjustment"""
+    volatility_rating = settings.VOLATILITY_RATINGS.get(symbol, 1.0)
+    # More aggressive adjustment for high-volatility assets
+    risk_multiplier = SMC_PARAMS['atr_risk_multiplier'] * (1.5 - volatility_rating)
+    risk_amount = account_balance * (risk_multiplier / 100)
     return risk_amount / (atr / price)
 
 def evaluate_conditions(df: pd.DataFrame, market_condition: str, symbol: str) -> Dict:
@@ -212,20 +289,40 @@ def evaluate_conditions(df: pd.DataFrame, market_condition: str, symbol: str) ->
         'near_support': False,
         'near_resistance': False,
         'confirmed_support': False,
-        'confirmed_resistance': False
+        'confirmed_resistance': False,
+        'low_volatility': False,
+        'strong_momentum': False,
+        'at_key_level': False
     }
     
     try:
+        # Volatility filter - reject low volatility signals
+        atr_pct = last["atr"] / last["close"] if "atr" in last else 0
+        conditions['low_volatility'] = atr_pct < SMC_PARAMS['min_atr_threshold']
+        
         # Common conditions
         conditions.update({
             'broke_high': last["close"] > prev["high"],
             'broke_low': last["close"] < prev["low"],
             'rsi_ok': (params['rsi_oversold'] < last["rsi"] < params['rsi_overbought']),
-            'vol_spike': (last["volume"] > last["volume_ma"] * (0.8 if market_condition == "NEUTRAL" else 1.0)),
+            'vol_spike': (last["volume"] > last["volume_ma"] * params['volume_spike_multiplier']),
             'trend_aligned': (market_condition == "BULLISH" and last["ema5"] > last["ema10"]) or 
                             (market_condition == "BEARISH" and last["ema5"] < last["ema10"]),
             'vwap_confirm': 'vwap' in df.columns and last['close'] > last['vwap'],
-            'trend_strength': last['adx'] > 30
+            'trend_strength': last['adx'] > 25,
+            'strong_momentum': (
+                (last["rsi"] < 40) or  # Oversold for buys
+                (last["rsi"] > 60)     # Overbought for sells
+            )
+        })
+        
+        # Liquidity zone detection
+        zones = detect_liquidity_zones(df)
+        conditions.update({
+            'near_resistance': abs(last["close"] - zones['key_resistance']) / last["close"] < 0.005,
+            'near_support': abs(last["close"] - zones['key_support']) / last["close"] < 0.005,
+            'at_key_level': abs(last["close"] - zones['key_resistance']) / last["close"] < 0.005 or 
+                           abs(last["close"] - zones['key_support']) / last["close"] < 0.005
         })
         
         # Specific conditions for NEUTRAL market
@@ -234,12 +331,10 @@ def evaluate_conditions(df: pd.DataFrame, market_condition: str, symbol: str) ->
                 conditions.update({
                     'near_support': (abs(last["close"] - last["bb_lower"]) / last["close"] < params['bband_threshold']),
                     'near_resistance': (abs(last["close"] - last["bb_upper"]) / last["close"] < params['bband_threshold']),
-                    'confirmed_support': (conditions['near_support'] and 
-                                        (last["close"] > last["open"]) and 
-                                        (last["volume"] > last["volume_ma"] * params['volume_spike_multiplier'])),
-                    'confirmed_resistance': (conditions['near_resistance'] and 
-                                           (last["close"] < last["open"]) and 
-                                           (last["volume"] > last["volume_ma"] * params['volume_spike_multiplier']))
+                    'confirmed_support': (last["close"] > last["open"]) and 
+                                        (last["volume"] > last["volume_ma"] * params['volume_spike_multiplier']),
+                    'confirmed_resistance': (last["close"] < last["open"]) and 
+                                           (last["volume"] > last["volume_ma"] * params['volume_spike_multiplier'])
                 })
             else:
                 logger.warning(f"Invalid BB values for {symbol} in NEUTRAL market")
@@ -248,13 +343,14 @@ def evaluate_conditions(df: pd.DataFrame, market_condition: str, symbol: str) ->
         conditions.update({
             'retest': (last["low"] > prev["high"] * (1 - params['retest_buffer'])) if conditions['broke_high'] else 
                      (last["high"] < prev["low"] * (1 + params['retest_buffer'])) if conditions['broke_low'] else False,
-            'stoch_bullish': last["stoch_k"] > last["stoch_d"],
-            'stoch_bearish': last["stoch_k"] < last["stoch_d"],
-            'macd_bullish': last["macd_line"] > last["macd_signal"],
-            'macd_bearish': last["macd_line"] < last["macd_signal"],
+            'stoch_bullish': last["stoch_k"] > last["stoch_d"] and last["stoch_k"] < 80,
+            'stoch_bearish': last["stoch_k"] < last["stoch_d"] and last["stoch_k"] > 20,
+            'macd_bullish': last["macd_line"] > last["macd_signal"] and last["macd_hist"] > 0,
+            'macd_bearish': last["macd_line"] < last["macd_signal"] and last["macd_hist"] < 0,
             'adx_ok': last["adx"] > settings.ADX_THRESHOLDS.get(symbol, 20)
         })
         
+        # Check divergence
         bull_div, bear_div = check_divergence(df)
         conditions.update({
             'bull_div': bull_div,
@@ -269,40 +365,49 @@ def evaluate_conditions(df: pd.DataFrame, market_condition: str, symbol: str) ->
     return conditions
 
 def calculate_scores(conditions: Dict, market_condition: str) -> Tuple[float, float]:
-    """Calculate buy and sell scores"""
-    params = SMC_PARAMS
+    """Calculate buy and sell scores with tiered weighting"""
+    CORE_WEIGHT = 2.5  # Breakouts, volume spikes
+    CONFIRM_WEIGHT = 1.5  # Trend alignment, ADX
+    SECONDARY_WEIGHT = 0.7  # Oscillators
+    NEGATIVE_WEIGHT = 2.0  # Penalties
     
     buy_score = sum([
-        conditions['broke_high'] * 1.8,
-        conditions['stoch_bullish'] * 1.0,
-        conditions['vol_spike'] * 1.0,
-        conditions['trend_aligned'] * 0.8,
-        conditions['macd_bullish'] * 0.8,
-        conditions['adx_ok'] * 0.5,
-        conditions['retest'] * 0.7,
-        (not conditions['bear_div']) * 0.5,
-        conditions['vwap_confirm'] * 0.7,
-        conditions['trend_strength'] * 0.5,
+        conditions['broke_high'] * CORE_WEIGHT,
+        conditions['vol_spike'] * CORE_WEIGHT,
+        conditions['trend_aligned'] * CONFIRM_WEIGHT,
+        conditions['adx_ok'] * CONFIRM_WEIGHT,
+        conditions['vwap_confirm'] * CONFIRM_WEIGHT,
+        conditions['stoch_bullish'] * SECONDARY_WEIGHT,
+        conditions['macd_bullish'] * SECONDARY_WEIGHT,
+        conditions['retest'] * SECONDARY_WEIGHT,
+        conditions['strong_momentum'] * 1.5,
+        conditions['at_key_level'] * 1.2,
+        # Penalties
+        -NEGATIVE_WEIGHT if conditions['bear_div'] else 0,
+        -NEGATIVE_WEIGHT if conditions['low_volatility'] else 0
     ])
     
     sell_score = sum([
-        conditions['broke_low'] * 1.8,
-        conditions['stoch_bearish'] * 1.0,
-        conditions['vol_spike'] * 1.0,
-        (not conditions['trend_aligned']) * 0.8,
-        conditions['macd_bearish'] * 0.8,
-        conditions['adx_ok'] * 0.5,
-        conditions['retest'] * 0.7,
-        (not conditions['bull_div']) * 0.5,
-        ('vwap' in conditions and not conditions['vwap_confirm']) * 0.7,
-        conditions['trend_strength'] * 0.5,
+        conditions['broke_low'] * CORE_WEIGHT,
+        conditions['vol_spike'] * CORE_WEIGHT,
+        (not conditions['trend_aligned'] and market_condition != "BULLISH") * CONFIRM_WEIGHT,
+        conditions['adx_ok'] * CONFIRM_WEIGHT,
+        (not conditions['vwap_confirm']) * CONFIRM_WEIGHT,
+        conditions['stoch_bearish'] * SECONDARY_WEIGHT,
+        conditions['macd_bearish'] * SECONDARY_WEIGHT,
+        conditions['retest'] * SECONDARY_WEIGHT,
+        conditions['strong_momentum'] * 1.5,
+        conditions['at_key_level'] * 1.2,
+        # Penalties
+        -NEGATIVE_WEIGHT if conditions['bull_div'] else 0,
+        -NEGATIVE_WEIGHT if conditions['low_volatility'] else 0
     ])
     
     return buy_score, sell_score
 
 def get_signal(df: pd.DataFrame, symbol: str, market_condition: str, 
-               consecutive_losses: int = 0, exchange=None) -> Optional[SMCSignal]:
-    """Generate trading signal with improved error handling"""
+               consecutive_losses: int = 0) -> Optional[SMCSignal]:
+    """Generate trading signal with improved filters"""
     if df is None or len(df) < 50:
         logger.warning(f"Insufficient data for {symbol}")
         return None
@@ -311,51 +416,74 @@ def get_signal(df: pd.DataFrame, symbol: str, market_condition: str,
         return None
         
     try:
-        # Evaluate all conditions with proper validation
+        # Evaluate all conditions
         conditions = evaluate_conditions(df, market_condition, symbol)
+        
+        # Skip if low volatility
+        if conditions['low_volatility']:
+            return None
         
         # Check neutral market specific conditions
         if market_condition == "NEUTRAL":
-            if not all(key in conditions for key in ['confirmed_support', 'confirmed_resistance']):
-                logger.warning(f"Missing required conditions for {symbol} in NEUTRAL market")
-                return None
-                
             if not (conditions.get('confirmed_support', False) or 
                    conditions.get('confirmed_resistance', False)):
                 return None
                 
             if not conditions.get('rsi_ok', False):
                 return None
-        
+                
+            # Require strong momentum in neutral markets
+            if not conditions['strong_momentum']:
+                return None
+                
+            # Avoid counter-BTC trades in neutral markets
+            btc_df = fetch_ohlcv("BTCUSDT", settings.TIMEFRAME, 50)
+            if btc_df is not None and len(btc_df) > 0:
+                btc_last = btc_df.iloc[-1]
+                if symbol != "BTCUSDT":
+                    if conditions['trend_aligned'] == False and btc_last['close'] > btc_last['ema20']:
+                        return None
+
         # Calculate scores
         buy_score, sell_score = calculate_scores(conditions, market_condition)
         
         # Apply adaptive threshold
-        adaptive_threshold = SMC_PARAMS['base_threshold'] - (
-            SMC_PARAMS['adaptive_loss_factor'] * min(consecutive_losses, 3))
+        adaptive_threshold = max(
+            SMC_PARAMS['min_score_non_trend'],
+            SMC_PARAMS['base_threshold'] - 
+            (SMC_PARAMS['adaptive_loss_factor'] * min(consecutive_losses, 3))
+        )
         
-        # Check higher timeframe confirmation if available
-        htf_confirm = False
-        if exchange:
-            htf_confirm = check_higher_timeframe_confirmation(exchange, symbol, 
-                "BUY" if buy_score > sell_score else "SELL")
-            if htf_confirm:
+        # Check higher timeframe confirmation for stronger signals
+        htf_confirm = check_higher_timeframe_confirmation(
+            symbol,
+            "BUY" if buy_score > sell_score else "SELL",
+            market_condition
+        )
+        
+        # Boost score if HTF confirms
+        if htf_confirm:
+            if buy_score > sell_score:
                 buy_score += SMC_PARAMS['htf_confirm_weight']
+            else:
                 sell_score += SMC_PARAMS['htf_confirm_weight']
         
-        # Generate signal with all conditions validated
+        # Generate signal
         atr = df["atr"].iloc[-1] if "atr" in df.columns else None
         entry_price = df["close"].iloc[-1]
-        if (buy_score >= adaptive_threshold and conditions.get('rsi_ok', False) and 
-            (buy_score >= SMC_PARAMS['min_score_non_trend'] or market_condition != "BEARISH")):
+        
+        if (buy_score >= adaptive_threshold and 
+            conditions['rsi_ok'] and
+            (market_condition != "BEARISH" or buy_score > adaptive_threshold + 1.0)):
             return SMCSignal(
                 "BUY", symbol, buy_score, adaptive_threshold,
                 {k: v for k, v in conditions.items() if v},
                 atr, entry_price, market_condition
             )
             
-        elif (sell_score >= adaptive_threshold and conditions.get('rsi_ok', False) and 
-              (sell_score >= SMC_PARAMS['min_score_non_trend'] or market_condition != "BULLISH")):
+        elif (sell_score >= adaptive_threshold and 
+              conditions['rsi_ok'] and
+              (market_condition != "BULLISH" or sell_score > adaptive_threshold + 1.0)):
             return SMCSignal(
                 "SELL", symbol, sell_score, adaptive_threshold,
                 {k: v for k, v in conditions.items() if v},
