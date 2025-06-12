@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 from typing import Optional, Tuple
 
-# ========== CONFIGURABLE PARAMETERS ==========
+# ========== UPDATED PARAMETERS ==========
 INDICATOR_PARAMS = {
     # AlphaTrend Parameters
     'alphatrend_length': 14,
@@ -34,49 +34,53 @@ class IndicatorError(Exception):
     pass
 
 def calculate_alphatrend(df, length=14, multiplier=1.0, use_mfi=True):
-    """Calculate AlphaTrend indicator as per TradingView script"""
+    """Robust AlphaTrend calculation"""
     try:
-        # Calculate ATR
-        tr = ta.true_range(df['high'], df['low'], df['close'])
-        atr = ta.sma(tr, length=length)
-        
-        # Calculate upT and downT
+        df = df.copy()
+        tr = ta.true_range(high=df['high'], low=df['low'], close=df['close'])
+        atr = tr.rolling(window=length).mean().fillna(0)
+
         df['upT'] = df['low'] - atr * multiplier
         df['downT'] = df['high'] + atr * multiplier
-        
-        # Initialize AlphaTrend
+
         alpha_trend = np.zeros(len(df))
         last_value = np.nan
-        
+
         for i in range(len(df)):
-            if use_mfi:
-                # We'll pre-calculate MFI separately
-                cond = df['mfi'].iloc[i] >= 50 if i < len(df) else False
-            else:
-                cond = df['rsi'].iloc[i] >= 50 if i < len(df) else False
-                
-            if np.isnan(last_value):
-                alpha_trend[i] = df['upT'].iloc[i] if cond else df['downT'].iloc[i]
-            else:
-                if cond:
-                    if df['upT'].iloc[i] < last_value:
-                        alpha_trend[i] = last_value
-                    else:
-                        alpha_trend[i] = df['upT'].iloc[i]
+            if i < 1:
+                if use_mfi:
+                    cond = df['mfi'].iloc[i] >= 50
                 else:
-                    if df['downT'].iloc[i] > last_value:
-                        alpha_trend[i] = last_value
-                    else:
-                        alpha_trend[i] = df['downT'].iloc[i]
-            
+                    cond = df['rsi'].iloc[i] >= 50
+                alpha_trend[i] = df['upT'].iloc[i] if cond else df['downT'].iloc[i]
+                last_value = alpha_trend[i]
+                continue
+
+            if use_mfi:
+                cond = df['mfi'].iloc[i] >= 50
+            else:
+                cond = df['rsi'].iloc[i] >= 50
+
+            if cond:
+                if df['upT'].iloc[i] < last_value:
+                    alpha_trend[i] = last_value
+                else:
+                    alpha_trend[i] = df['upT'].iloc[i]
+            else:
+                if df['downT'].iloc[i] > last_value:
+                    alpha_trend[i] = last_value
+                else:
+                    alpha_trend[i] = df['downT'].iloc[i]
+
             last_value = alpha_trend[i]
-        
-        return alpha_trend
+
+        df['AlphaTrend'] = alpha_trend
+        return df['AlphaTrend']
     except Exception as e:
         raise IndicatorError(f"AlphaTrend calculation failed: {str(e)}")
-
+    
 def calculate_indicators(df: pd.DataFrame) -> Optional[pd.DataFrame]:
-    """Enhanced indicator calculation with AlphaTrend strategy"""
+    """Enhanced indicator calculation with structure detection"""
     if df is None or len(df) < 100:
         return None
         
@@ -137,6 +141,10 @@ def calculate_indicators(df: pd.DataFrame) -> Optional[pd.DataFrame]:
         # ===== ADDITIONAL INDICATORS FOR RISK MANAGEMENT =====
         df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=14)
         df["volume_ma"] = df["volume"].rolling(20).mean()
+        
+        # ===== PRICE STRUCTURE DETECTION =====
+        df['swing_low'] = df['low'].rolling(5).min()
+        df['swing_high'] = df['high'].rolling(5).max()
         
         return df.dropna()
     except Exception as e:

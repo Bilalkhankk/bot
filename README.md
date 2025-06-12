@@ -80,3 +80,6 @@ trading_bot/
 ├── utils/
 │   └── helpers.py
 └── README.md
+
+
+.\venv\Scripts\activate 

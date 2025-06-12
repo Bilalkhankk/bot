@@ -1,27 +1,50 @@
-PAIRS = ["XRPUSDT","DOGEUSDT","ADAUSDT","SUIUSDT","TRXUSDT","BLURUSDT"]
+# Trading Parameters
+PAIRS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'ADAUSDT', 'DOGEUSDT']
 TIMEFRAME = "15m"
-LEVERAGE = 5 
-TRADE_AMOUNT = 6      # $6 per trade
-MAX_TRADES = 1
-NEUTRAL_MAX_TRADES = 1
-LOG_FILE = "trades.csv"
-STATE_FILE = "bot_state.json"
+
+# Telegram Configuration
+TELEGRAM_BOT_TOKEN = "7981744692:AAEo4dmDLqrbIr0vUOCeQLnQFDHfaoTqcOw"  # Replace with your actual token
+TELEGRAM_CHAT_ID = "-1002655134174"  # Replace with your actual chat ID
+
+# Signal Parameters (for display in notifications)
+LEVERAGE = 5
+RISK_PERCENT = 1
+
 
 ADX_THRESHOLDS = {
-    "BTCUSDT": 18,
-    "DOGEUSDT": 22,
-    "XRPUSDT": 24,
-    "SUIUSDT": 23,  
-    "BLURUSDT": 20,
-    "TRXUSDT": 21,
-    "ADAUSDT": 22,
+    "BTCUSDT": 22,
+    "ETHUSDT": 20,
+    "SOLUSDT": 25,
+    "DOGEUSDT": 25,  # Require stronger trend for volatile assets
+    "XRPUSDT": 20
 }
-# Exchange configuration
+MAX_LEVERAGE = {
+    "DOGEUSDT": 15,
+    "TRXUSDT": 10,
+    "XRPUSDT": 20,
+    "ADAUSDT": 20,
+    "ETHUSDT": 50,
+    "SOLUSDT": 50
+}
+VOLATILITY_RATINGS = {
+    "BTCUSDT": 0.9,
+    "ETHUSDT": 0.85,
+    "SOLUSDT": 0.8,
+    "XRPUSDT": 0.7,
+    "DOGEUSDT": 0.6,  # High volatility
+    "ADAUSDT": 0.75,
+    "TRXUSDT": 0.65
+}
+# Exchange configuration (read-only access, no account needed)
 EXCHANGE_CONFIG = {
     'enableRateLimit': True,
-    'apiKey': 'bt6wtI5SlRsJn8IhECt2saUgLeaGbuVRH9ON8vjUmnI8wjpKR7p4Xf6xzss3JpPy',
-    'secret': 'iLjBvRiaZDOEWgznGjDxFeB31vtEAKRpKP2qw4A38I2CPGmyCOrZlbqkjFyiWB8T',
     'options': {
-        'defaultType': 'future',
+        'defaultType': 'future',  # or 'spot' if you're using spot data
     }
 }
+
+# Signal Display Settings
+SHOW_RSI = True
+SHOW_MACD = True
+SHOW_VOLUME = True
+SHOW_SUPPORT_RESISTANCE = True
