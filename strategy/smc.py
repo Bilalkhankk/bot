@@ -9,37 +9,43 @@ class Signal:
         self.signal_type = signal_type
         self.symbol = symbol
         self.entry_price = entry_price
-        # Fixed SL and TP at 0.5%
+        
+        # Dynamic risk management (1% risk)
+        risk_percent = 0.01
         if signal_type == "BUY":
-            self.sl_price = entry_price * (1 - 0.005)
-            self.tp_price = entry_price * (1 + 0.005)
+            self.sl_price = entry_price * (1 - risk_percent)
+            self.tp_price = entry_price * (1 + risk_percent * 2)  # 1:2 risk ratio
         else:  # "SELL"
-            self.sl_price = entry_price * (1 + 0.005)
-            self.tp_price = entry_price * (1 - 0.005)
+            self.sl_price = entry_price * (1 + risk_percent)
+            self.tp_price = entry_price * (1 - risk_percent * 2)
 
 def get_signal(df: pd.DataFrame, symbol: str, market_condition: str) -> Optional[Signal]:
-    """Generate signals based on RSI and MACD crossovers"""
-    if len(df) < 2:  # Need at least 2 candles for crossover detection
+    """Generate signals based on RSI and MACD crossovers with more practical conditions"""
+    if len(df) < 3:
         return None
 
     try:
-        # Get current and previous candle
         current = df.iloc[-1]
-        previous = df.iloc[-2]
+        prev = df.iloc[-2]
         
-        # Long entry conditions
-        long_rsi = (previous['rsi_fast'] <= previous['rsi_slow']) and (current['rsi_fast'] > current['rsi_slow'])
-        long_macd = (previous['macd_line'] <= previous['macd_signal']) and (current['macd_line'] > current['macd_signal'])
+        # Bullish conditions
+        bullish_rsi = (prev['rsi_fast'] <= prev['rsi_slow']) and (current['rsi_fast'] > current['rsi_slow'])
+        bullish_macd = (prev['macd_line'] <= prev['macd_signal']) and (current['macd_line'] > current['macd_signal'])
+        volume_ok = current['volume'] > current['volume_ma']  # Volume above MA
         
-        # Short entry conditions
-        short_rsi = (previous['rsi_fast'] >= previous['rsi_slow']) and (current['rsi_fast'] < current['rsi_slow'])
-        short_macd = (previous['macd_line'] >= previous['macd_signal']) and (current['macd_line'] < current['macd_signal'])
+        # Bearish conditions
+        bearish_rsi = (prev['rsi_fast'] >= prev['rsi_slow']) and (current['rsi_fast'] < current['rsi_slow'])
+        bearish_macd = (prev['macd_line'] >= prev['macd_signal']) and (current['macd_line'] < current['macd_signal'])
         
-        # Generate signals
-        if long_rsi and long_macd:
-            return Signal("BUY", symbol, current['close'])
-        elif short_rsi and short_macd:
-            return Signal("SELL", symbol, current['close'])
+        # Generate signals with more practical conditions
+        if bullish_rsi and bullish_macd and volume_ok:
+            # Additional confirmation: Price above opening price
+            if current['close'] > current['open']:
+                return Signal("BUY", symbol, current['close'])
+        elif bearish_rsi and bearish_macd and volume_ok:
+            # Additional confirmation: Price below opening price
+            if current['close'] < current['open']:
+                return Signal("SELL", symbol, current['close'])
             
         return None
         
@@ -47,7 +53,5 @@ def get_signal(df: pd.DataFrame, symbol: str, market_condition: str) -> Optional
         logger.error(f"Signal generation error: {str(e)}")
         return None
 
-# Market condition function kept but simplified
 def check_market_condition() -> str:
-    """Simplified market condition analysis"""
-    return "NEUTRAL"  # Not used in new strategy but required by main.py
+    return "NEUTRAL"

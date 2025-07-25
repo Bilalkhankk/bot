@@ -2,6 +2,12 @@
 TOP_PAIRS_NUMBER = 5  # Number of top pairs to monitor
 TIMEFRAME = "15m"
 
-# Telegram Configuration
-TELEGRAM_BOT_TOKEN = "7981744692:AAEo4dmDLqrbIr0vUOCeQLnQFDHfaoTqcOw"
-TELEGRAM_CHAT_ID = "-1002655134174"
+# Trading pairs to monitor
+PAIRS = ["BTCUSDT", "ETHUSDT", "ADAUSDT", "SOLUSDT", "DOGEUSDT"]
+
+# Risk management
+TP_PERCENT = 0.005  # 0.50% Take Profit
+SL_PERCENT = 0.005  # 0.50% Stop Loss
+
+DISCORD_WEBHOOK_URL ="https://canary.discord.com/api/webhooks/1397221996898812015/40_aJO8Tb5zAAoxGcChj9CnLEUPLQkxMo1QlN_FWtIutJeCwp6nNpipJ5w58A2-DVXw7"
+

@@ -10,7 +10,7 @@ exchange = ccxt.binance({
     }
 })
 
-def fetch_ohlcv(symbol, timeframe, limit=100):
+def fetch_ohlcv(symbol, timeframe, limit=200):
     """Fetch OHLCV data with retry logic"""
     for _ in range(3):  # Retry up to 3 times
         try:
