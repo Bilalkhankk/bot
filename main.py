@@ -21,7 +21,27 @@ logger = logging.getLogger(__name__)
 # Global state
 last_signals = {}  # Prevent duplicate signals
 active_signals = {}  # Track active signals for TP/SL monitoring
+import json
+import os
 current_prices = {}  # Current price tracking
+
+# --- Persistent Storage for Active Signals ---
+SIGNALS_FILE = "active_signals.json"
+
+def save_active_signals():
+    with open(SIGNALS_FILE, "w") as f:
+        json.dump(active_signals, f, default=str)
+
+def load_active_signals():
+    global active_signals
+    if os.path.exists(SIGNALS_FILE):
+        with open(SIGNALS_FILE, "r") as f:
+            active_signals = json.load(f)
+    else:
+        active_signals = {}
+
+# Load signals at startup
+load_active_signals()
 
 # --- Exchange Setup ---
 def setup_exchange():
@@ -97,7 +117,7 @@ def add_indicators(df):
 
 # --- Advanced Signal Generation (Accuracy-Focused) ---
 def detect_rsi_crossover(df):
-    """Detect RSI-9 vs RSI-21 crossover with additional filters"""
+    """Enhanced RSI crossover detection to avoid extreme conditions"""
     if len(df) < 3:  # Need at least 3 candles for confirmation
         return None
     
@@ -105,95 +125,133 @@ def detect_rsi_crossover(df):
     prev = df.iloc[-2]
     curr = df.iloc[-1]
     
-    # Additional volume filter (must have above-average volume)
+    # Enhanced volume filter
     if curr['volume_ratio'] < 1.2:  # Volume must be 20% above average
         return None
     
-    # Buy Signal: RSI-9 crosses above RSI-21
-    # Additional conditions for accuracy:
-    # 1. Both RSI values between 30-80 (avoid extreme overbought/oversold)
+    # Buy Signal with improved conditions (avoid extreme oversold)
+    # Enhanced conditions for accuracy:
+    # 1. Improved RSI ranges to avoid quick reversals
     # 2. Sustained crossover (confirmed over 2 periods)
     # 3. RSI-9 trending upward
     if (prev2['rsi_9'] < prev2['rsi_21'] and 
         prev['rsi_9'] <= prev['rsi_21'] and 
         curr['rsi_9'] > curr['rsi_21'] and
-        30 < curr['rsi_9'] < 80 and 30 < curr['rsi_21'] < 70 and
+        35 < curr['rsi_9'] < 75 and 40 < curr['rsi_21'] < 70 and  # Avoid extreme oversold
         curr['rsi_9'] > prev['rsi_9']):  # RSI-9 trending up
         return 'BUY'
     
-    # Sell Signal: RSI-9 crosses below RSI-21
-    # Additional conditions for accuracy:
-    # 1. Both RSI values between 20-70 (avoid extreme conditions)
+    # Sell Signal with improved conditions (avoid extreme overbought)
+    # Enhanced conditions for accuracy:
+    # 1. Improved RSI ranges to avoid quick reversals
     # 2. Sustained crossover (confirmed over 2 periods)  
     # 3. RSI-9 trending downward
     if (prev2['rsi_9'] > prev2['rsi_21'] and 
         prev['rsi_9'] >= prev['rsi_21'] and 
         curr['rsi_9'] < curr['rsi_21'] and
-        20 < curr['rsi_9'] < 70 and 30 < curr['rsi_21'] < 70 and
+        25 < curr['rsi_9'] < 65 and 30 < curr['rsi_21'] < 60 and  # Avoid extreme overbought
         curr['rsi_9'] < prev['rsi_9']):  # RSI-9 trending down
         return 'SELL'
     
     return None
 
 def confirm_with_macd(df, signal_type):
-    """Enhanced MACD confirmation with momentum filter"""
+    """Enhanced MACD confirmation with symbol-aware strength requirements"""
     if len(df) < 2:
         return False
         
     prev = df.iloc[-2]
     curr = df.iloc[-1]
     
-    # For BUY: MACD line above signal AND gaining momentum
+    # Symbol-aware MACD strength requirements
+    symbol = df.attrs.get('symbol', '')
+    if 'DOGE' in symbol or 'ADA' in symbol:
+        min_strength = 0.002  # Higher threshold for volatile small-cap coins
+    elif 'BTC' in symbol:
+        min_strength = 50     # BTC has larger MACD values
+    elif 'ETH' in symbol:
+        min_strength = 5      # ETH moderate MACD values
+    else:
+        min_strength = 1      # Other pairs
+    
+    # For BUY: MACD line above signal AND gaining momentum AND sufficient strength
     if signal_type == 'BUY':
         return (curr['macd_line'] > curr['macd_signal'] and 
-                curr['macd_line'] > prev['macd_line'])  # MACD gaining upward momentum
+                curr['macd_line'] > prev['macd_line'] and
+                abs(curr['macd_line']) > min_strength)  # MACD gaining upward momentum
     
-    # For SELL: MACD line below signal AND losing momentum  
+    # For SELL: MACD line below signal AND losing momentum AND sufficient strength
     elif signal_type == 'SELL':
         return (curr['macd_line'] < curr['macd_signal'] and 
-                curr['macd_line'] < prev['macd_line'])  # MACD gaining downward momentum
+                curr['macd_line'] < prev['macd_line'] and
+                abs(curr['macd_line']) > min_strength)  # MACD gaining downward momentum
     
     return False
 
-def additional_market_filters(df):
-    """Additional filters to reduce false signals"""
+def additional_market_filters(df, signal_type):
+    """Enhanced 15m-optimized filters for better entries"""
     curr = df.iloc[-1]
-    prev = df.iloc[-1]
-    
-    # Volatility filter: Avoid signals during extreme volatility
-    recent_highs = df['high'].tail(10)
-    recent_lows = df['low'].tail(10)
-    volatility = (recent_highs.max() - recent_lows.min()) / curr['close']
-    
-    # Skip signals if volatility > 5% (too choppy)
-    if volatility > 0.05:
+    closes = df['close']
+    highs = df['high']
+    lows = df['low']
+
+    # 15m-optimized trend filter using EMA-20 (more responsive than EMA-50)
+    ema20 = closes.ewm(span=20, adjust=False).mean().iloc[-1]
+    if signal_type == 'BUY' and curr['close'] < ema20:
         return False
-    
-    # Price momentum filter: Price should be moving in signal direction
-    price_momentum = (curr['close'] - df['close'].iloc[-5]) / df['close'].iloc[-5]
-    
-    return True  # All filters passed
+    if signal_type == 'SELL' and curr['close'] > ema20:
+        return False
+
+    # Recent price position filter (avoid buying tops/selling bottoms)
+    recent_highs = highs.tail(5).max()
+    recent_lows = lows.tail(5).min()
+    if recent_highs != recent_lows:  # Avoid division by zero
+        current_position = (curr['close'] - recent_lows) / (recent_highs - recent_lows)
+        
+        # Don't sell at the bottom 30% of recent range, don't buy at top 70%
+        if signal_type == 'SELL' and current_position < 0.3:
+            return False
+        if signal_type == 'BUY' and current_position > 0.7:
+            return False
+
+    # Choppiness filter (slightly adjusted for 15m)
+    price_range = (highs.tail(10).max() - lows.tail(10).min()) / closes.tail(10).mean()
+    if price_range < 0.002:  # <0.2% range = too flat
+        return False
+    if price_range > 0.06:   # >6% range = too wild
+        return False
+
+    # Faster momentum confirmation for 15m (2-candle lookback)
+    if signal_type == 'BUY' and closes.iloc[-1] < closes.iloc[-2]:
+        return False
+    if signal_type == 'SELL' and closes.iloc[-1] > closes.iloc[-2]:
+        return False
+
+    return True
 
 def generate_signal(symbol, df, timeframe):
     """Generate high-accuracy trading signal with multiple confirmations"""
+    # Add symbol info to dataframe for MACD filtering
+    df.attrs['symbol'] = symbol
+    
     # First check: RSI crossover
     signal_type = detect_rsi_crossover(df)
     if not signal_type:
         return None
-    
+
     # Second check: MACD confirmation
     if not confirm_with_macd(df, signal_type):
         logger.debug(f"{symbol} {timeframe}: RSI signal but MACD not confirmed")
         return None
-    
+
     # Third check: Market condition filters
-    if not additional_market_filters(df):
+    if not additional_market_filters(df, signal_type):
         logger.debug(f"{symbol} {timeframe}: Signal filtered out by market conditions")
         return None
-    
+
     curr = df.iloc[-1]
     entry_price = curr['close']
-    
+
     # Fixed 0.50% TP and SL as requested
     if signal_type == 'BUY':
         tp_price = entry_price * (1 + settings.TP_PERCENT)
@@ -201,7 +259,7 @@ def generate_signal(symbol, df, timeframe):
     else:  # SELL
         tp_price = entry_price * (1 - settings.TP_PERCENT)
         sl_price = entry_price * (1 + settings.SL_PERCENT)
-    
+
     return {
         'symbol': symbol,
         'signal_type': signal_type,
@@ -218,50 +276,19 @@ def generate_signal(symbol, df, timeframe):
     }
 
 def format_signal_message(signal):
-    """Format enhanced signal with improved styling for Discord"""
-    # Choose colors and emojis based on signal type
-    if signal['signal_type'] == 'BUY':
-        header_emoji = "🟢📈"
-        signal_bg = "```diff\n+ BUY SIGNAL DETECTED +```"
-        entry_emoji = "🚀"
-        color_theme = "🟢"
-    else:
-        header_emoji = "🔴📉"
-        signal_bg = "```diff\n- SELL SIGNAL DETECTED -```"
-        entry_emoji = "🎯"
-        color_theme = "🔴"
-    
     return (
-        f"{signal_bg}\n"
-        f"{header_emoji} **{signal['symbol']} {signal['signal_type']} SIGNAL** {header_emoji}\n"
-        f"```css\n"
-        f"═══════════════════════════════════\n"
-        f"```\n"
-        f"{entry_emoji} **ENTRY DETAILS:**\n"
-        f"```yaml\n"
-        f"Symbol: {signal['symbol']}\n"
-        f"Timeframe: {signal['timeframe']}\n"
-        f"Entry Price: {signal['entry_price']:.4f}\n"
-        f"```\n"
-        f"� **PROFIT TARGETS:**\n"
-        f"```diff\n"
-        f"+ Take Profit: {signal['tp_price']:.4f} (+0.50%)\n"
-        f"- Stop Loss: {signal['sl_price']:.4f} (-0.50%)\n"
-        f"```\n"
-        f"� **TECHNICAL ANALYSIS:**\n"
-        f"```apache\n"
-        f"RSI-9:     {signal['rsi_9']:.1f}\n"
-        f"RSI-21:    {signal['rsi_21']:.1f}\n"
-        f"MACD Line: {signal['macd_line']:.6f}\n"
-        f"MACD Sig:  {signal['macd_signal']:.6f}\n"
-        f"Volume:    {signal['volume_ratio']:.1f}x average\n"
-        f"```\n"
-        f"⏰ **TIME:** `{signal['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}`\n"
-        f"🎯 **Strategy:** `RSI(9,21) + MACD(9,21,9)`\n"
-        f"```css\n"
-        f"═══════════════════════════════════\n"
-        f"```\n"
-        f"{color_theme} **TRADE RESPONSIBLY - MANAGE YOUR RISK** {color_theme}"
+        f"[{signal['symbol']}] {signal['signal_type']}\n"
+        f"Entry: {signal['entry_price']:.6f}\n"
+        f"TP: {signal['tp_price']:.6f} (+0.50%)\n"
+        f"SL: {signal['sl_price']:.6f} (-0.50%)\n"
+        f"Signal Time: {signal['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+
+def format_result_message(signal, hit_type, hit_price):
+    return (
+        f"[{signal['symbol']}] {signal['signal_type']}\n"
+        f"{hit_type} HIT at {hit_price:.6f}\n"
+        f"Time: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}"
     )
 
 # --- Optimized Data Fetching ---
@@ -295,94 +322,44 @@ def fetch_candles(exchange, symbol, timeframe, limit=100):
         logger.error(f"Error fetching {symbol} {timeframe}: {str(e)}")
         return pd.DataFrame()
 
+
 # --- TP/SL Monitoring ---
 def check_tp_sl_hits(symbol):
-    """Check if any active signals hit TP or SL"""
-    if symbol not in active_signals or symbol not in current_prices:
+    """Check if TP or SL is hit for any active signal for the symbol."""
+    if symbol not in active_signals or not active_signals[symbol]:
         return
-    
-    current_price = current_prices[symbol]
     signals_to_remove = []
-    
-    for signal_id, signal in active_signals[symbol].items():
+    current_price = current_prices.get(symbol)
+    if current_price is None:
+        return
+    for signal_id, signal in list(active_signals[symbol].items()):
         tp_hit = False
         sl_hit = False
-        
         if signal['signal_type'] == 'BUY':
             if current_price >= signal['tp_price']:
                 tp_hit = True
             elif current_price <= signal['sl_price']:
                 sl_hit = True
-        else:  # SELL
+        elif signal['signal_type'] == 'SELL':
             if current_price <= signal['tp_price']:
                 tp_hit = True
             elif current_price >= signal['sl_price']:
                 sl_hit = True
-        
         if tp_hit:
-            message = (
-                f"```diff\n+ TAKE PROFIT ACHIEVED +```\n"
-                f"🎯🟢 **PROFIT TARGET HIT** 🟢🎯\n"
-                f"```css\n"
-                f"═══════════════════════════════════\n"
-                f"```\n"
-                f"💰 **TRADE COMPLETED SUCCESSFULLY:**\n"
-                f"```yaml\n"
-                f"Symbol: {signal['symbol']}\n"
-                f"Direction: {signal['signal_type']}\n"
-                f"Timeframe: {signal['timeframe']}\n"
-                f"```\n"
-                f"📊 **PRICE MOVEMENT:**\n"
-                f"```diff\n"
-                f"+ Entry Price: {signal['entry_price']:.4f}\n"
-                f"+ Exit Price:  {current_price:.4f}\n"
-                f"+ Profit: +0.50% ✅\n"
-                f"```\n"
-                f"🔓 **STATUS:** `Signal CLOSED - Ready for new signals`\n"
-                f"⏰ **Closed:** `{pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}`\n"
-                f"```css\n"
-                f"═══════════════════════════════════\n"
-                f"```\n"
-                f"🎉 **CONGRATULATIONS ON THE PROFIT!** 🎉"
-            )
+            message = format_result_message(signal, "TP", current_price)
             send_discord_message(message)
             logger.info(f"TP HIT: {symbol} {signal['signal_type']} @ {current_price:.4f} - Signal closed")
             signals_to_remove.append(signal_id)
-            
+            save_active_signals()
         elif sl_hit:
-            message = (
-                f"```diff\n- STOP LOSS TRIGGERED -```\n"
-                f"🛑🔴 **STOP LOSS HIT** ��🛑\n"
-                f"```css\n"
-                f"═══════════════════════════════════\n"
-                f"```\n"
-                f"⚠️ **TRADE STOPPED FOR PROTECTION:**\n"
-                f"```yaml\n"
-                f"Symbol: {signal['symbol']}\n"
-                f"Direction: {signal['signal_type']}\n"
-                f"Timeframe: {signal['timeframe']}\n"
-                f"```\n"
-                f"📊 **PRICE MOVEMENT:**\n"
-                f"```diff\n"
-                f"- Entry Price: {signal['entry_price']:.4f}\n"
-                f"- Exit Price:  {current_price:.4f}\n"
-                f"- Loss: -0.50% ❌\n"
-                f"```\n"
-                f"🔓 **STATUS:** `Signal CLOSED - Ready for new signals`\n"
-                f"⏰ **Closed:** `{pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}`\n"
-                f"```css\n"
-                f"═══════════════════════════════════\n"
-                f"```\n"
-                f"💪 **RISK MANAGED - NEXT OPPORTUNITY AWAITS!** 💪"
-            )
+            message = format_result_message(signal, "SL", current_price)
             send_discord_message(message)
             logger.info(f"SL HIT: {symbol} {signal['signal_type']} @ {current_price:.4f} - Signal closed")
             signals_to_remove.append(signal_id)
-    
+            save_active_signals()
     # Remove completed signals
     for signal_id in signals_to_remove:
         del active_signals[symbol][signal_id]
-    
     # Clean up empty symbol entries
     if symbol in active_signals and not active_signals[symbol]:
         del active_signals[symbol]
@@ -439,7 +416,7 @@ async def monitor_symbol(exchange, symbol, timeframes=['15m']):
                         if symbol not in active_signals:
                             active_signals[symbol] = {}
                         active_signals[symbol][signal_key] = signal
-                        
+                        save_active_signals()
                         # Clean old signals (4 hours for crypto volatility)
                         current_time = time.time()
                         old_signals = [k for k, v in last_signals.items() if current_time - v > 14400]
