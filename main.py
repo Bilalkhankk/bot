@@ -8,6 +8,7 @@ import logging
 import pandas as pd
 import ccxt
 import requests
+from datetime import datetime
 from config import settings
 
 # Configure logging
@@ -45,12 +46,15 @@ load_active_signals()
 
 # --- Exchange Setup ---
 def setup_exchange():
-    """Initialize Binance Futures exchange with optimized settings"""
+    """Initialize Binance Futures exchange with trading capabilities"""
     return ccxt.binance({
+        'apiKey': settings.BINANCE_API_KEY,
+        'secret': settings.BINANCE_SECRET_KEY,
         'options': {'defaultType': 'future'},
         'enableRateLimit': True,
         'rateLimit': 100,  # Optimized for live data
         'timeout': 20000,
+        'sandbox': False,  # Live trading
     })
 
 # --- Discord Messaging ---
@@ -72,6 +76,87 @@ def send_discord_message(message):
             logger.error(f"Discord error: {response.status_code}")
     except Exception as e:
         logger.error(f"Discord error: {str(e)}")
+
+# --- Position Size Calculation ---
+def calculate_position_size(exchange, symbol, entry_price):
+    """Calculate position size based on your risk management"""
+    try:
+        # Get account balance
+        balance = exchange.fetch_balance()
+        usdt_balance = balance['USDT']['free']
+        
+        # Your plan: $3 per trade with 50x leverage
+        trade_amount = min(3.0, usdt_balance * 0.10)  # Max 10% of account or $3
+        
+        # Calculate position size (leverage is set on Binance account)
+        position_size = trade_amount / entry_price
+        
+        # Round to appropriate precision for the symbol
+        if 'DOGE' in symbol:
+            position_size = round(position_size, 0)  # Whole numbers for DOGE
+        elif 'BTC' in symbol:
+            position_size = round(position_size, 3)  # 3 decimal places for BTC
+        else:
+            position_size = round(position_size, 2)  # 2 decimal places for others
+            
+        return position_size
+        
+    except Exception as e:
+        logger.error(f"Error calculating position size: {e}")
+        return 0
+
+# --- Trading Functions ---
+def place_futures_order(exchange, symbol, side, amount):
+    """Place a futures market order on Binance"""
+    try:
+        # Convert symbol format (BTCUSDT -> BTC/USDT)
+        ccxt_symbol = f"{symbol[:-4]}/{symbol[-4:]}" if symbol.endswith('USDT') else symbol
+        
+        order = exchange.create_market_order(
+            symbol=ccxt_symbol,
+            side=side.lower(),
+            amount=amount,
+        )
+        
+        logger.info(f"✅ ORDER PLACED: {symbol} {side} {amount} @ Market")
+        return order
+        
+    except Exception as e:
+        logger.error(f"❌ ORDER FAILED: {symbol} {side} - {str(e)}")
+        return None
+
+def close_position(exchange, symbol, signal_type):
+    """Close futures position by placing opposite market order"""
+    try:
+        # Convert symbol format
+        ccxt_symbol = f"{symbol[:-4]}/{symbol[-4:]}" if symbol.endswith('USDT') else symbol
+        
+        # Get current positions
+        positions = exchange.fetch_positions([ccxt_symbol])
+        
+        # Find the position to close
+        for position in positions:
+            if position['symbol'] == ccxt_symbol and float(position['size']) > 0:
+                # Determine close side (opposite of original signal)
+                close_side = 'sell' if signal_type == 'BUY' else 'buy'
+                amount = abs(float(position['size']))
+                
+                # Place close order
+                close_order = exchange.create_market_order(
+                    symbol=ccxt_symbol,
+                    side=close_side,
+                    amount=amount,
+                )
+                
+                logger.info(f"✅ POSITION CLOSED: {symbol} {close_side} {amount} @ Market")
+                return close_order
+        
+        logger.warning(f"⚠️ No position found to close for {symbol}")
+        return None
+        
+    except Exception as e:
+        logger.error(f"❌ CLOSE FAILED: {symbol} - {str(e)}")
+        return None
 
 # --- Technical Indicators (Optimized for Crypto) ---
 def calculate_rsi(prices, period):
@@ -324,7 +409,7 @@ def fetch_candles(exchange, symbol, timeframe, limit=100):
 
 
 # --- TP/SL Monitoring ---
-def check_tp_sl_hits(symbol):
+def check_tp_sl_hits(symbol, exchange=None):
     """Check if TP or SL is hit for any active signal for the symbol."""
     if symbol not in active_signals or not active_signals[symbol]:
         return
@@ -349,12 +434,22 @@ def check_tp_sl_hits(symbol):
             message = format_result_message(signal, "TP", current_price)
             send_discord_message(message)
             logger.info(f"TP HIT: {symbol} {signal['signal_type']} @ {current_price:.4f} - Signal closed")
+            
+            # Close position if live trading is enabled
+            if hasattr(settings, 'BINANCE_API_KEY') and exchange:
+                close_position(exchange, symbol, signal['signal_type'])
+            
             signals_to_remove.append(signal_id)
             save_active_signals()
         elif sl_hit:
             message = format_result_message(signal, "SL", current_price)
             send_discord_message(message)
             logger.info(f"SL HIT: {symbol} {signal['signal_type']} @ {current_price:.4f} - Signal closed")
+            
+            # Close position if live trading is enabled
+            if hasattr(settings, 'BINANCE_API_KEY') and exchange:
+                close_position(exchange, symbol, signal['signal_type'])
+            
             signals_to_remove.append(signal_id)
             save_active_signals()
     # Remove completed signals
@@ -386,7 +481,7 @@ async def monitor_symbol(exchange, symbol, timeframes=['15m']):
                     continue
                 
                 # Check TP/SL hits for existing signals
-                check_tp_sl_hits(symbol)
+                check_tp_sl_hits(symbol, exchange)
                 
                 # Generate high-accuracy signal
                 signal = generate_signal(symbol, df, timeframe)
@@ -398,25 +493,48 @@ async def monitor_symbol(exchange, symbol, timeframes=['15m']):
                         continue
                     
                     # Enhanced duplicate prevention (include timeframe and price range)
-                    signal_key = f"{symbol}_{timeframe}_{signal['signal_type']}_{signal['entry_price']:.2f}"
+                    signal_key = f"{symbol}_{timeframe}_{signal['type']}_{signal['entry_price']:.2f}"
                     
                     if signal_key not in last_signals:
+                        # Store signal with entry price for position sizing
+                        entry_price = signal['entry_price']
+                        timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+                        signal_id = f"{symbol}_{signal['type']}_{timestamp}"
+                        
+                        active_signals.setdefault(symbol, {})[signal_id] = {
+                            'signal_type': signal['type'],
+                            'entry_price': entry_price,
+                            'tp_price': signal['tp'],
+                            'sl_price': signal['sl'],
+                            'timestamp': timestamp
+                        }
+                        save_active_signals()
+                        
+                        # Execute trade if live trading is enabled
+                        if hasattr(settings, 'BINANCE_API_KEY') and exchange:
+                            position_size = calculate_position_size(exchange, symbol, entry_price)
+                            if position_size > 0:
+                                side = 'buy' if signal['type'] == 'BUY' else 'sell'
+                                trade_result = place_futures_order(exchange, symbol, side, position_size)
+                                
+                                if trade_result:
+                                    logger.info(f"🚀 LIVE TRADE EXECUTED: {symbol} {signal['type']} Size: {position_size} ($3)")
+                        
                         # Send optimized signal to Discord
                         message = format_signal_message(signal)
                         send_discord_message(message)
                         
                         # Enhanced logging
-                        logger.info(f"HIGH-ACCURACY SIGNAL: {symbol} {timeframe} {signal['signal_type']} @ {signal['entry_price']:.4f}")
-                        logger.info(f"RSI(9,21): {signal['rsi_9']:.1f}/{signal['rsi_21']:.1f} | MACD: {signal['macd_line']:.6f}")
+                        logger.info(f"HIGH-ACCURACY SIGNAL: {symbol} {timeframe} {signal['type']} @ {signal['entry_price']:.4f}")
+                        logger.info(f"RSI(9,21): {signal.get('rsi_9', 0):.1f}/{signal.get('rsi_21', 0):.1f} | MACD: {signal.get('macd_line', 0):.6f}")
                         
                         # Store signal
                         last_signals[signal_key] = time.time()
                         
-                        # Add to active monitoring
+                        # Add to active monitoring (clean up old format)
                         if symbol not in active_signals:
                             active_signals[symbol] = {}
-                        active_signals[symbol][signal_key] = signal
-                        save_active_signals()
+                        
                         # Clean old signals (4 hours for crypto volatility)
                         current_time = time.time()
                         old_signals = [k for k, v in last_signals.items() if current_time - v > 14400]
@@ -440,16 +558,26 @@ async def main():
     logger.info(f"💰 Fixed TP/SL: {settings.TP_PERCENT*100:.2f}%")
     logger.info(f"🔧 Enhanced Filters: Volume, Volatility, Momentum")
     
-    # Setup optimized exchange
-    exchange = setup_exchange()
+    # Setup exchange for live trading if API keys are configured
+    exchange = None
+    if hasattr(settings, 'BINANCE_API_KEY') and settings.BINANCE_API_KEY != "your_binance_api_key_here":
+        exchange = setup_exchange()
+        if exchange:
+            logger.info("🚀 LIVE TRADING MODE - Binance API connected successfully!")
+        else:
+            logger.warning("⚠️ Failed to connect to Binance API - Running in signal-only mode")
+    else:
+        logger.info("📊 SIGNAL-ONLY MODE - Add API keys to settings.py for live trading")
+        exchange = setup_exchange()  # For data fetching only
     
     # Test Discord connection
+    mode_text = "LIVE TRADING" if (hasattr(settings, 'BINANCE_API_KEY') and settings.BINANCE_API_KEY != "your_binance_api_key_here") else "SIGNAL ONLY"
     send_discord_message(
         f"``` BOT SUCCESSFULLY STARTED +```\n"
         f"🤖🚀 **OPTIMIZED TRADING BOT ONLINE** 🚀🤖\n"
         f"⏰ **Started:** `{pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}`\n"
+        f"🔄 **Mode:** `{mode_text}`\n"
         f"═══════════════════════════════════\n"
-        f"```\n"
         f"🔥 **READY TO HUNT HIGH-PROBABILITY SIGNALS!** 🔥"
     )
     
