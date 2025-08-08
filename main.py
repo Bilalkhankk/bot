@@ -1,6 +1,7 @@
 """
-Production-ready Binance Futures Signal Bot
+Production-ready Binance Futures Signal Bot - SIGNAL GENERATION ONLY
 Optimized RSI-9/RSI-21 + MACD(8,21,5) Strategy for Maximum Accuracy
+LIVE TRADING DISABLED - Signals Only
 """
 import asyncio
 import time
@@ -18,6 +19,9 @@ logging.basicConfig(
     datefmt='%H:%M:%S'
 )
 logger = logging.getLogger(__name__)
+
+# TRADING CONTROL - Set to False to disable all live trading
+LIVE_TRADING_ENABLED = False
 
 # Global state
 last_signals = {}  # Prevent duplicate signals
@@ -210,37 +214,29 @@ def detect_rsi_crossover(df):
     prev = df.iloc[-2]
     curr = df.iloc[-1]
     
-    # Enhanced volume filter
-    if curr['volume_ratio'] < 1.2:  # Volume must be 20% above average
+    # RELAXED volume filter - allow signals during normal trading
+    if curr['volume_ratio'] < 0.5:  # Volume must be at least 50% of average (was 120%)
         return None
     
-    # Buy Signal with improved conditions (avoid extreme oversold)
-    # Enhanced conditions for accuracy:
-    # 1. Improved RSI ranges to avoid quick reversals
-    # 2. Sustained crossover (confirmed over 2 periods)
-    # 3. RSI-9 trending upward
+    # RELAXED Buy Signal - much wider RSI ranges for more signals
     if (prev2['rsi_9'] < prev2['rsi_21'] and 
         prev['rsi_9'] <= prev['rsi_21'] and 
         curr['rsi_9'] > curr['rsi_21'] and
-        35 < curr['rsi_9'] < 75 and 40 < curr['rsi_21'] < 70 and  # Avoid extreme oversold
+        20 < curr['rsi_9'] < 80 and 25 < curr['rsi_21'] < 75 and  # WIDER ranges
         curr['rsi_9'] > prev['rsi_9']):  # RSI-9 trending up
         return 'BUY'
     
-    # Sell Signal with improved conditions (avoid extreme overbought)
-    # Enhanced conditions for accuracy:
-    # 1. Improved RSI ranges to avoid quick reversals
-    # 2. Sustained crossover (confirmed over 2 periods)  
-    # 3. RSI-9 trending downward
+    # RELAXED Sell Signal - much wider RSI ranges for more signals
     if (prev2['rsi_9'] > prev2['rsi_21'] and 
         prev['rsi_9'] >= prev['rsi_21'] and 
         curr['rsi_9'] < curr['rsi_21'] and
-        25 < curr['rsi_9'] < 65 and 30 < curr['rsi_21'] < 60 and  # Avoid extreme overbought
+        20 < curr['rsi_9'] < 80 and 25 < curr['rsi_21'] < 75 and  # WIDER ranges
         curr['rsi_9'] < prev['rsi_9']):  # RSI-9 trending down
         return 'SELL'
     
     return None
 
-def confirm_with_macd(df, signal_type):
+def confirm_with_macd(df, signal_type, symbol):
     """Enhanced MACD confirmation with symbol-aware strength requirements"""
     if len(df) < 2:
         return False
@@ -248,16 +244,15 @@ def confirm_with_macd(df, signal_type):
     prev = df.iloc[-2]
     curr = df.iloc[-1]
     
-    # Symbol-aware MACD strength requirements
-    symbol = df.attrs.get('symbol', '')
+    # MUCH MORE RELAXED MACD strength requirements for more signals
     if 'DOGE' in symbol or 'ADA' in symbol:
-        min_strength = 0.002  # Higher threshold for volatile small-cap coins
+        min_strength = 0.0001  # Very low for small-cap coins
     elif 'BTC' in symbol:
-        min_strength = 50     # BTC has larger MACD values
+        min_strength = 5       # Much lower for BTC (was 10)
     elif 'ETH' in symbol:
-        min_strength = 5      # ETH moderate MACD values
+        min_strength = 0.5     # Much lower for ETH (was 1)
     else:
-        min_strength = 1      # Other pairs
+        min_strength = 0.1     # Much lower for other pairs (was 0.5)
     
     # For BUY: MACD line above signal AND gaining momentum AND sufficient strength
     if signal_type == 'BUY':
@@ -273,6 +268,59 @@ def confirm_with_macd(df, signal_type):
     
     return False
 
+def detect_market_condition(df):
+    """Detect if market is trending or choppy based on price action and volatility"""
+    closes = df['close']
+    highs = df['high']
+    lows = df['low']
+    
+    # Get recent 20 candles for analysis
+    recent_data = df.tail(20)
+    
+    # Calculate price range percentage over last 20 candles
+    recent_high = recent_data['high'].max()
+    recent_low = recent_data['low'].min()
+    price_range_pct = ((recent_high - recent_low) / recent_low) * 100
+    
+    # Calculate Average True Range (ATR) for volatility
+    high_low = recent_data['high'] - recent_data['low']
+    high_close = abs(recent_data['high'] - recent_data['close'].shift())
+    low_close = abs(recent_data['low'] - recent_data['close'].shift())
+    true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    atr = true_range.rolling(window=14).mean().iloc[-1]
+    atr_pct = (atr / closes.iloc[-1]) * 100
+    
+    # Calculate trend strength using EMA slope
+    ema20 = closes.ewm(span=20).mean()
+    ema_slope = (ema20.iloc[-1] - ema20.iloc[-5]) / ema20.iloc[-5] * 100
+    
+    # Calculate choppiness using price swings
+    price_swings = 0
+    for i in range(-10, -1):
+        if i + 1 < 0:  # Ensure we don't go out of bounds
+            if ((closes.iloc[i] > closes.iloc[i-1] and closes.iloc[i+1] < closes.iloc[i]) or 
+                (closes.iloc[i] < closes.iloc[i-1] and closes.iloc[i+1] > closes.iloc[i])):
+                price_swings += 1
+    
+    # Market condition logic
+    if price_range_pct > 2.5 and abs(ema_slope) > 0.3 and price_swings < 4:
+        condition = "TRENDING"
+        strength = "Strong" if price_range_pct > 4 else "Moderate"
+    elif price_range_pct < 1.5 and abs(ema_slope) < 0.2 and price_swings > 6:
+        condition = "CHOPPY"
+        strength = "High" if price_swings > 8 else "Moderate"
+    else:
+        condition = "MIXED"
+        strength = "Moderate"
+    
+    return {
+        'condition': condition,
+        'strength': strength,
+        'price_range_pct': price_range_pct,
+        'volatility_pct': atr_pct,
+        'trend_slope': ema_slope
+    }
+
 def additional_market_filters(df, signal_type):
     """Enhanced 15m-optimized filters for better entries"""
     curr = df.iloc[-1]
@@ -280,59 +328,57 @@ def additional_market_filters(df, signal_type):
     highs = df['high']
     lows = df['low']
 
-    # 15m-optimized trend filter using EMA-20 (more responsive than EMA-50)
+    # MUCH MORE RELAXED trend filter - allow counter-trend signals
     ema20 = closes.ewm(span=20, adjust=False).mean().iloc[-1]
-    if signal_type == 'BUY' and curr['close'] < ema20:
+    if signal_type == 'BUY' and curr['close'] < ema20 * 0.995:  # Allow 0.5% deviation
         return False
-    if signal_type == 'SELL' and curr['close'] > ema20:
+    if signal_type == 'SELL' and curr['close'] > ema20 * 1.005:  # Allow 0.5% deviation
         return False
 
-    # Recent price position filter (avoid buying tops/selling bottoms)
-    recent_highs = highs.tail(5).max()
-    recent_lows = lows.tail(5).min()
-    if recent_highs != recent_lows:  # Avoid division by zero
+    # RELAXED price position filter - wider acceptable ranges
+    recent_highs = highs.tail(8).max()  # Longer lookback
+    recent_lows = lows.tail(8).min()
+    if recent_highs != recent_lows:
         current_position = (curr['close'] - recent_lows) / (recent_highs - recent_lows)
         
-        # Don't sell at the bottom 30% of recent range, don't buy at top 70%
-        if signal_type == 'SELL' and current_position < 0.3:
+        # MUCH MORE RELAXED - only avoid extreme positions
+        if signal_type == 'SELL' and current_position < 0.15:  # Only avoid bottom 15%
             return False
-        if signal_type == 'BUY' and current_position > 0.7:
+        if signal_type == 'BUY' and current_position > 0.85:   # Only avoid top 15%
             return False
 
-    # Choppiness filter (slightly adjusted for 15m)
-    price_range = (highs.tail(10).max() - lows.tail(10).min()) / closes.tail(10).mean()
-    if price_range < 0.002:  # <0.2% range = too flat
+    # MUCH MORE RELAXED choppiness filter
+    price_range = (highs.tail(15).max() - lows.tail(15).min()) / closes.tail(15).mean()
+    if price_range < 0.0005:  # <0.05% range = extremely flat
         return False
-    if price_range > 0.06:   # >6% range = too wild
+    if price_range > 0.20:    # >20% range = extremely wild
         return False
 
-    # Faster momentum confirmation for 15m (2-candle lookback)
-    if signal_type == 'BUY' and closes.iloc[-1] < closes.iloc[-2]:
-        return False
-    if signal_type == 'SELL' and closes.iloc[-1] > closes.iloc[-2]:
-        return False
+    # REMOVE momentum confirmation - it was too restrictive
+    # Allow signals even if last candle went opposite direction
 
     return True
 
 def generate_signal(symbol, df, timeframe):
     """Generate high-accuracy trading signal with multiple confirmations"""
-    # Add symbol info to dataframe for MACD filtering
-    df.attrs['symbol'] = symbol
-    
     # First check: RSI crossover
     signal_type = detect_rsi_crossover(df)
     if not signal_type:
+        logger.info(f"{symbol} {timeframe}: No RSI crossover detected (RSI9: {df.iloc[-1]['rsi_9']:.1f}, RSI21: {df.iloc[-1]['rsi_21']:.1f}, Vol: {df.iloc[-1]['volume_ratio']:.2f})")
         return None
 
-    # Second check: MACD confirmation
-    if not confirm_with_macd(df, signal_type):
-        logger.debug(f"{symbol} {timeframe}: RSI signal but MACD not confirmed")
+    # Second check: MACD confirmation (pass symbol as parameter)
+    if not confirm_with_macd(df, signal_type, symbol):
+        logger.info(f"{symbol} {timeframe}: RSI {signal_type} signal but MACD not confirmed")
         return None
 
     # Third check: Market condition filters
     if not additional_market_filters(df, signal_type):
-        logger.debug(f"{symbol} {timeframe}: Signal filtered out by market conditions")
+        logger.info(f"{symbol} {timeframe}: {signal_type} signal filtered out by market conditions")
         return None
+
+    # Detect market condition for signal context
+    market_info = detect_market_condition(df)
 
     curr = df.iloc[-1]
     entry_price = curr['close']
@@ -347,11 +393,15 @@ def generate_signal(symbol, df, timeframe):
 
     return {
         'symbol': symbol,
-        'signal_type': signal_type,
+        'type': signal_type,  # Fix: was 'signal_type', should be 'type'
         'entry_price': entry_price,
-        'tp_price': tp_price,
-        'sl_price': sl_price,
+        'tp': tp_price,  # Fix: was 'tp_price', should be 'tp'
+        'sl': sl_price,  # Fix: was 'sl_price', should be 'sl'
         'timeframe': timeframe,
+        'market_condition': market_info['condition'],
+        'market_strength': market_info['strength'],
+        'trend_slope': market_info['trend_slope'],
+        'volatility': market_info['volatility_pct'],
         'rsi_9': curr['rsi_9'],
         'rsi_21': curr['rsi_21'],
         'macd_line': curr['macd_line'],
@@ -361,18 +411,29 @@ def generate_signal(symbol, df, timeframe):
     }
 
 def format_signal_message(signal):
+    # Determine market condition emoji
+    if signal['market_condition'] == 'TRENDING':
+        market_emoji = "📈" if signal['trend_slope'] > 0 else "📉"
+    elif signal['market_condition'] == 'CHOPPY':
+        market_emoji = "⚡"
+    else:
+        market_emoji = "📊"
+    
     return (
-        f"[{signal['symbol']}] {signal['signal_type']}\n"
-        f"Entry: {signal['entry_price']:.6f}\n"
-        f"TP: {signal['tp_price']:.6f} (+0.50%)\n"
-        f"SL: {signal['sl_price']:.6f} (-0.50%)\n"
-        f"Signal Time: {signal['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}"
+        f"🚀 [{signal['symbol']}] {signal['type']} SIGNAL\n"
+        f"💰 Entry: {signal['entry_price']:.6f}\n"
+        f"🎯 TP: {signal['tp']:.6f} (+0.50%)\n"
+        f"🛑 SL: {signal['sl']:.6f} (-0.50%)\n"
+        f"{market_emoji} Market: {signal['market_condition']} ({signal['market_strength']})\n"
+        f"📊 Volatility: {signal['volatility']:.2f}%\n"
+        f"⏰ Time: {signal['timestamp'].strftime('%H:%M:%S')}"
     )
 
-def format_result_message(signal, hit_type, hit_price):
+def format_result_message(signal, hit_type, hit_price, symbol):
     return (
-        f"[{signal['symbol']}] {signal['signal_type']}\n"
+        f"[{symbol}] {signal['signal_type']}\n"
         f"{hit_type} HIT at {hit_price:.6f}\n"
+        f"Entry: {signal['entry_price']:.6f}\n"
         f"Time: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}"
     )
 
@@ -431,24 +492,28 @@ def check_tp_sl_hits(symbol, exchange=None):
             elif current_price >= signal['sl_price']:
                 sl_hit = True
         if tp_hit:
-            message = format_result_message(signal, "TP", current_price)
+            message = format_result_message(signal, "TP", current_price, symbol)
             send_discord_message(message)
             logger.info(f"TP HIT: {symbol} {signal['signal_type']} @ {current_price:.4f} - Signal closed")
             
-            # Close position if live trading is enabled
-            if hasattr(settings, 'BINANCE_API_KEY') and exchange:
+            # DISABLED: Position closing is turned off - only monitoring for signals
+            if LIVE_TRADING_ENABLED and hasattr(settings, 'BINANCE_API_KEY') and exchange:
                 close_position(exchange, symbol, signal['signal_type'])
+            else:
+                logger.info(f"📊 SIGNAL MONITORING: {symbol} TP would close @ {current_price:.4f} but live trading disabled")
             
             signals_to_remove.append(signal_id)
             save_active_signals()
         elif sl_hit:
-            message = format_result_message(signal, "SL", current_price)
+            message = format_result_message(signal, "SL", current_price, symbol)
             send_discord_message(message)
             logger.info(f"SL HIT: {symbol} {signal['signal_type']} @ {current_price:.4f} - Signal closed")
             
-            # Close position if live trading is enabled
-            if hasattr(settings, 'BINANCE_API_KEY') and exchange:
+            # DISABLED: Position closing is turned off - only monitoring for signals
+            if LIVE_TRADING_ENABLED and hasattr(settings, 'BINANCE_API_KEY') and exchange:
                 close_position(exchange, symbol, signal['signal_type'])
+            else:
+                logger.info(f"📊 SIGNAL MONITORING: {symbol} SL would close @ {current_price:.4f} but live trading disabled")
             
             signals_to_remove.append(signal_id)
             save_active_signals()
@@ -510,8 +575,8 @@ async def monitor_symbol(exchange, symbol, timeframes=['15m']):
                         }
                         save_active_signals()
                         
-                        # Execute trade if live trading is enabled
-                        if hasattr(settings, 'BINANCE_API_KEY') and exchange:
+                        # DISABLED: Live trading is turned off - only generating signals
+                        if LIVE_TRADING_ENABLED and hasattr(settings, 'BINANCE_API_KEY') and exchange:
                             position_size = calculate_position_size(exchange, symbol, entry_price)
                             if position_size > 0:
                                 side = 'buy' if signal['type'] == 'BUY' else 'sell'
@@ -519,6 +584,8 @@ async def monitor_symbol(exchange, symbol, timeframes=['15m']):
                                 
                                 if trade_result:
                                     logger.info(f"🚀 LIVE TRADE EXECUTED: {symbol} {signal['type']} Size: {position_size} ($3)")
+                        else:
+                            logger.info(f"📊 SIGNAL-ONLY MODE: {symbol} {signal['type']} (live trading disabled)")
                         
                         # Send optimized signal to Discord
                         message = format_signal_message(signal)
@@ -551,14 +618,15 @@ async def monitor_symbol(exchange, symbol, timeframes=['15m']):
 
 async def main():
     """Main application entry point with optimized settings"""
-    logger.info("🚀 Starting OPTIMIZED Binance Futures Signal Bot")
+    logger.info("� Starting SIGNAL-ONLY Binance Futures Bot")
     logger.info(f"📊 Monitoring pairs: {settings.PAIRS}")
     logger.info(f"⏱️ Timeframes: 15m")
-    logger.info(f"🎯 Strategy: RSI(9,21) + MACD(9,21,9) - Improved for Higher Win Rate")
+    logger.info(f"🎯 Strategy: RSI(9,21) + MACD(9,21,9) - Signal Generation Only")
     logger.info(f"💰 Fixed TP/SL: {settings.TP_PERCENT*100:.2f}%")
     logger.info(f"🔧 Enhanced Filters: Volume, Volatility, Momentum")
+    logger.info(f"❌ Live Trading: DISABLED (LIVE_TRADING_ENABLED = {LIVE_TRADING_ENABLED})")
     
-    # Setup exchange for live trading if API keys are configured
+    # Setup exchange for data fetching only
     exchange = None
     if hasattr(settings, 'BINANCE_API_KEY') and settings.BINANCE_API_KEY != "your_binance_api_key_here":
         exchange = setup_exchange()
@@ -571,14 +639,14 @@ async def main():
         exchange = setup_exchange()  # For data fetching only
     
     # Test Discord connection
-    mode_text = "LIVE TRADING" if (hasattr(settings, 'BINANCE_API_KEY') and settings.BINANCE_API_KEY != "your_binance_api_key_here") else "SIGNAL ONLY"
     send_discord_message(
-        f"``` BOT SUCCESSFULLY STARTED +```\n"
-        f"🤖🚀 **OPTIMIZED TRADING BOT ONLINE** 🚀🤖\n"
+        f"```BOT SUCCESSFULLY STARTED```\n"
+        f"� **SIGNAL-ONLY BOT ONLINE** �\n"
         f"⏰ **Started:** `{pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}`\n"
-        f"🔄 **Mode:** `{mode_text}`\n"
+        f"🔄 **Mode:** `SIGNAL GENERATION ONLY`\n"
+        f"❌ **Live Trading:** `DISABLED`\n"
         f"═══════════════════════════════════\n"
-        f"🔥 **READY TO HUNT HIGH-PROBABILITY SIGNALS!** 🔥"
+        f"🔥 **READY TO GENERATE SIGNALS!** 🔥"
     )
     
     # Create monitoring tasks for all symbols

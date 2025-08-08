@@ -7,7 +7,10 @@ TOP_PAIRS_NUMBER = 5  # Number of top pairs to monitor
 TIMEFRAME = "15m"
 
 # Trading pairs to monitor
-PAIRS = ["BTCUSDT", "ETHUSDT", "ADAUSDT", "SOLUSDT", "DOGEUSDT"]
+PAIRS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "ADAUSDT",
+    "XRPUSDT", "DOGEUSDT", "AVAXUSDT", "TRXUSDT", "LINKUSDT",
+    "DOTUSDT", "LTCUSDT", "BCHUSDT",
+    "UNIUSDT", "XLMUSDT", "APTUSDT", "OPUSDT", "TONUSDT"]
 
 # Risk management
 TP_PERCENT = 0.005  # 0.50% Take Profit
