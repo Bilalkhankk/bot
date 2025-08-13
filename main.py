@@ -214,23 +214,23 @@ def detect_rsi_crossover(df):
     prev = df.iloc[-2]
     curr = df.iloc[-1]
     
-    # RELAXED volume filter - allow signals during normal trading
-    if curr['volume_ratio'] < 0.5:  # Volume must be at least 50% of average (was 120%)
+    # BALANCED volume filter - require decent volume but not extreme
+    if curr['volume_ratio'] < 0.7:  # Volume must be at least 70% of average
         return None
     
-    # RELAXED Buy Signal - much wider RSI ranges for more signals
+    # BALANCED Buy Signal - reasonable RSI ranges for quality signals
     if (prev2['rsi_9'] < prev2['rsi_21'] and 
         prev['rsi_9'] <= prev['rsi_21'] and 
         curr['rsi_9'] > curr['rsi_21'] and
-        20 < curr['rsi_9'] < 80 and 25 < curr['rsi_21'] < 75 and  # WIDER ranges
+        25 < curr['rsi_9'] < 65 and 30 < curr['rsi_21'] < 60 and  # BALANCED ranges
         curr['rsi_9'] > prev['rsi_9']):  # RSI-9 trending up
         return 'BUY'
     
-    # RELAXED Sell Signal - much wider RSI ranges for more signals
+    # BALANCED Sell Signal - reasonable RSI ranges for quality signals
     if (prev2['rsi_9'] > prev2['rsi_21'] and 
         prev['rsi_9'] >= prev['rsi_21'] and 
         curr['rsi_9'] < curr['rsi_21'] and
-        20 < curr['rsi_9'] < 80 and 25 < curr['rsi_21'] < 75 and  # WIDER ranges
+        35 < curr['rsi_9'] < 75 and 40 < curr['rsi_21'] < 70 and  # BALANCED ranges
         curr['rsi_9'] < prev['rsi_9']):  # RSI-9 trending down
         return 'SELL'
     
@@ -244,15 +244,15 @@ def confirm_with_macd(df, signal_type, symbol):
     prev = df.iloc[-2]
     curr = df.iloc[-1]
     
-    # MUCH MORE RELAXED MACD strength requirements for more signals
+    # BALANCED MACD strength requirements for reasonable signal frequency
     if 'DOGE' in symbol or 'ADA' in symbol:
-        min_strength = 0.0001  # Very low for small-cap coins
+        min_strength = 0.0002  # Slightly higher for small-cap coins for quality
     elif 'BTC' in symbol:
-        min_strength = 5       # Much lower for BTC (was 10)
+        min_strength = 8       # Balanced for BTC (not too low, not too high)
     elif 'ETH' in symbol:
-        min_strength = 0.5     # Much lower for ETH (was 1)
+        min_strength = 0.8     # Balanced for ETH
     else:
-        min_strength = 0.1     # Much lower for other pairs (was 0.5)
+        min_strength = 0.15    # Balanced for other pairs
     
     # For BUY: MACD line above signal AND gaining momentum AND sufficient strength
     if signal_type == 'BUY':
@@ -322,40 +322,62 @@ def detect_market_condition(df):
     }
 
 def additional_market_filters(df, signal_type):
-    """Enhanced 15m-optimized filters for better entries"""
+    """BALANCED filters to protect against poor conditions while allowing reasonable signals"""
     curr = df.iloc[-1]
     closes = df['close']
     highs = df['high']
     lows = df['low']
 
-    # MUCH MORE RELAXED trend filter - allow counter-trend signals
+    # STRICT trend filter - only trade WITH strong trends
     ema20 = closes.ewm(span=20, adjust=False).mean().iloc[-1]
-    if signal_type == 'BUY' and curr['close'] < ema20 * 0.995:  # Allow 0.5% deviation
-        return False
-    if signal_type == 'SELL' and curr['close'] > ema20 * 1.005:  # Allow 0.5% deviation
+    ema_trend_strength = (ema20 - closes.ewm(span=20, adjust=False).mean().iloc[-5]) / closes.ewm(span=20, adjust=False).mean().iloc[-5]
+    
+    if signal_type == 'BUY':
+        if curr['close'] < ema20 * 1.002:  # Must be 0.2% above EMA
+            return False
+        if ema_trend_strength < 0.0008:  # EMA must be rising
+            return False
+    else:
+        if curr['close'] > ema20 * 0.998:  # Must be 0.2% below EMA  
+            return False
+        if ema_trend_strength > -0.0008:  # EMA must be falling
+            return False
+
+    # STRICT volatility requirement - avoid dead markets
+    volatility = highs.rolling(20).std() / closes.rolling(20).mean()
+    if volatility.iloc[-1] < 0.015:  # Require significant movement
         return False
 
-    # RELAXED price position filter - wider acceptable ranges
-    recent_highs = highs.tail(8).max()  # Longer lookback
-    recent_lows = lows.tail(8).min()
+    # STRICT price position filter - avoid ranging extremes
+    recent_highs = highs.tail(20).max()
+    recent_lows = lows.tail(20).min()
     if recent_highs != recent_lows:
         current_position = (curr['close'] - recent_lows) / (recent_highs - recent_lows)
         
-        # MUCH MORE RELAXED - only avoid extreme positions
-        if signal_type == 'SELL' and current_position < 0.15:  # Only avoid bottom 15%
+        # Only trade in favorable positions
+        if signal_type == 'SELL' and current_position < 0.25:  # Avoid bottom 25%
             return False
-        if signal_type == 'BUY' and current_position > 0.85:   # Only avoid top 15%
+        if signal_type == 'BUY' and current_position > 0.75:   # Avoid top 25%
             return False
 
-    # MUCH MORE RELAXED choppiness filter
-    price_range = (highs.tail(15).max() - lows.tail(15).min()) / closes.tail(15).mean()
-    if price_range < 0.0005:  # <0.05% range = extremely flat
+    # STRICT momentum requirement - price must be moving in signal direction
+    momentum_5 = (curr['close'] - df.iloc[-5]['close']) / df.iloc[-5]['close']
+    if signal_type == 'BUY' and momentum_5 < 0.002:  # 0.2% bullish momentum required
         return False
-    if price_range > 0.20:    # >20% range = extremely wild
+    if signal_type == 'SELL' and momentum_5 > -0.002:  # 0.2% bearish momentum required
         return False
 
-    # REMOVE momentum confirmation - it was too restrictive
-    # Allow signals even if last candle went opposite direction
+    # STRICT choppiness avoidance
+    price_range = (highs.tail(20).max() - lows.tail(20).min()) / closes.tail(20).mean()
+    if price_range < 0.008:  # Avoid flat markets (<0.8% range)
+        return False
+    if price_range > 0.15:    # Avoid extremely volatile markets (>15% range)
+        return False
+
+    # Volume confirmation - need above average activity
+    avg_volume = df['volume'].rolling(20).mean().iloc[-1]
+    if curr['volume'] < avg_volume * 1.1:  # Require 10% above average volume
+        return False
 
     return True
 
@@ -379,6 +401,16 @@ def generate_signal(symbol, df, timeframe):
 
     # Detect market condition for signal context
     market_info = detect_market_condition(df)
+    
+    # BALANCED market condition filter - avoid only extreme conditions
+    if market_info['condition'] == 'CHOPPY':
+        logger.info(f"{symbol} {timeframe}: {signal_type} signal blocked - CHOPPY market detected")
+        return None
+    
+    # For MIXED markets, only block if volatility is very high (dangerous conditions)
+    if market_info['condition'] == 'MIXED' and market_info['volatility'] > 0.025:  # 2.5% volatility threshold
+        logger.info(f"{symbol} {timeframe}: {signal_type} signal blocked - High volatility MIXED market")
+        return None
 
     curr = df.iloc[-1]
     entry_price = curr['close']
@@ -422,8 +454,8 @@ def format_signal_message(signal):
     return (
         f"🚀 [{signal['symbol']}] {signal['type']} SIGNAL\n"
         f"💰 Entry: {signal['entry_price']:.6f}\n"
-        f"🎯 TP: {signal['tp']:.6f} (+0.50%)\n"
-        f"🛑 SL: {signal['sl']:.6f} (-0.50%)\n"
+        f"🎯 TP: {signal['tp']:.6f} (+{settings.TP_PERCENT*100:.2f}%)\n"
+        f"🛑 SL: {signal['sl']:.6f} (-{settings.SL_PERCENT*100:.2f}%)\n"
         f"{market_emoji} Market: {signal['market_condition']} ({signal['market_strength']})\n"
         f"📊 Volatility: {signal['volatility']:.2f}%\n"
         f"⏰ Time: {signal['timestamp'].strftime('%H:%M:%S')}"

@@ -12,9 +12,10 @@ PAIRS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "ADAUSDT",
     "DOTUSDT", "LTCUSDT", "BCHUSDT",
     "UNIUSDT", "XLMUSDT", "APTUSDT", "OPUSDT", "TONUSDT"]
 
-# Risk management
-TP_PERCENT = 0.005  # 0.50% Take Profit
-SL_PERCENT = 0.005  # 0.50% Stop Loss
+# Risk management - CONSERVATIVE values that work
+TP_PERCENT = 0.0075   # 0.60% Take Profit 
+SL_PERCENT = 0.004   # 0.40% Stop Loss
+# Risk:Reward = 1.5:1 (requires ~40% win rate for profitability)
 
 # --- Discord Configuration ---
 DISCORD_WEBHOOK_URL ="https://canary.discord.com/api/webhooks/1397221996898812015/40_aJO8Tb5zAAoxGcChj9CnLEUPLQkxMo1QlN_FWtIutJeCwp6nNpipJ5w58A2-DVXw7"
